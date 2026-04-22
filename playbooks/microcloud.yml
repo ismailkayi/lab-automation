@@ -1,0 +1,111 @@
+---
+# ==============================================================================
+# MicroCloud Cluster Provisioning Playbook
+# Installs required snaps and bootstraps a MicroCloud cluster via preseed
+# ==============================================================================
+
+- name: Prepare MicroCloud Nodes
+  hosts: microcloud
+  gather_facts: false
+  tasks:
+    - name: Wait for LXD VM to boot and become reachable
+      wait_for_connection:
+        timeout: 120
+
+    - name: Gather OS facts now that system is up
+      setup:
+
+    - name: Wait for snapd system seed to complete (Ubuntu boot requirement)
+      command: snap wait system seed.loaded
+      changed_when: false
+      retries: 10
+      delay: 5
+
+    - name: Install microcloud snap
+      command: snap install microcloud --channel=2/stable
+      register: snap_microcloud
+      until: snap_microcloud.rc == 0
+      retries: 3
+      delay: 10
+      changed_when: "'already installed' not in snap_microcloud.stderr"
+
+    - name: Install microceph snap
+      command: snap install microceph --channel=squid/stable
+      register: snap_microceph
+      until: snap_microceph.rc == 0
+      retries: 3
+      delay: 10
+      changed_when: "'already installed' not in snap_microceph.stderr"
+
+    - name: Install microovn snap
+      command: snap install microovn --channel=24.03/stable
+      register: snap_microovn
+      until: snap_microovn.rc == 0
+      retries: 3
+      delay: 10
+      changed_when: "'already installed' not in snap_microovn.stderr"
+
+    - name: Install lxd snap (may already be present)
+      command: snap install lxd --channel=5.21/stable
+      register: snap_lxd
+      until: snap_lxd.rc == 0
+      retries: 3
+      delay: 10
+      # lxd is pre-installed on Ubuntu VMs, treat "already installed" as success
+      failed_when:
+        - snap_lxd.rc != 0
+        - "'already installed' not in snap_lxd.stderr"
+      changed_when: "'already installed' not in snap_lxd.stderr"
+
+# --- Bootstrap the MicroCloud cluster from the first node ---
+- name: Bootstrap MicroCloud Cluster (Node 1)
+  hosts: microcloud[0]
+  tasks:
+    - name: Derive /24 lookup subnet from node's default IPv4 address
+      # ansible_default_ipv4.address gives e.g. "10.88.0.10"
+      # We strip the last octet and append ".0/24" → "10.88.0.0/24"
+      set_fact:
+        lookup_subnet: "{{ ansible_default_ipv4.address.split('.')[:-1] | join('.') + '.0/24' }}"
+
+    - name: Write MicroCloud preseed file to /tmp
+      copy:
+        dest: /tmp/microcloud-preseed.yaml
+        mode: '0600'
+        content: |
+          lookup_subnet: {{ lookup_subnet }}
+          systems:
+          {% for host in groups['microcloud'] %}
+            - name: {{ host }}
+              ovn_uplink_interface: eth1
+              storage:
+                ceph:
+                  - path: /dev/sdb
+                    wipe: true
+          {% endfor %}
+          ovn:
+            ipv4_gateway: 10.0.1.1/24
+            ipv4_ranges: 10.0.1.100-10.0.1.200
+            dns_servers: 8.8.8.8
+          ceph:
+            internal_network: {{ lookup_subnet }}
+
+    - name: Read preseed file content for stdin
+      slurp:
+        src: /tmp/microcloud-preseed.yaml
+      register: preseed_content
+
+    - name: Run microcloud init with preseed (cluster bootstrap)
+      command: microcloud init --preseed
+      args:
+        stdin: "{{ preseed_content.content | b64decode }}"
+      register: microcloud_init
+      changed_when: microcloud_init.rc == 0
+
+    - name: Verify MicroCloud cluster formed
+      command: microcloud cluster list
+      register: cluster_list
+      changed_when: false
+
+    - name: Show cluster members
+      debug:
+        msg: "{{ cluster_list.stdout_lines }}"
