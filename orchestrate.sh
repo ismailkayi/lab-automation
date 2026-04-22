@@ -129,8 +129,8 @@ ensure_tools
 tofu init -v >/dev/null 2>&1
 
 echo ""
-echo "1) Deploy k8s-snap (3 Node Canonical Kubernetes)"
-echo "2) Deploy microcloud (3 Node MicroCloud w/ Ceph & OVN)"
+echo "1) Deploy K8s-Snap (3 Node Canonical Kubernetes)"
+echo "2) Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)"
 echo "3) Manage / Destroy Environments"
 read -p "Select action: " action
 
@@ -139,7 +139,7 @@ if [[ "$action" == "3" ]]; then
     exit 0
 fi
 
-read -p "Enter your username/prefix (e.g., ismail): " user_prefix
+read -p "Enter your lab-name (e.g., your name): " user_prefix
 user_prefix=$(echo "$user_prefix" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
 
 case $action in
