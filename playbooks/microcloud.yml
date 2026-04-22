@@ -139,16 +139,24 @@
       when: joiner_preseed_jobs is defined and ((joiner_preseed_jobs.results | default([])) | selectattr('ansible_job_id', 'defined') | list | length) > 0
 
     - name: Read OVN UPLINK network state in LXD
-      shell: lxc network list --format csv -c n,s | awk -F, '$1=="UPLINK" {print $2}'
-      register: ovn_uplink_state
+      command: lxc network show UPLINK
+      register: ovn_uplink_show
       changed_when: false
       failed_when: false
+
+    - name: Set OVN UPLINK created flag
+      set_fact:
+        ovn_uplink_created: "{{ ovn_uplink_show.rc == 0 and ('status: Created' in ovn_uplink_show.stdout) }}"
 
     - name: Create or complete OVN UPLINK target config on each node
       command: lxc network create UPLINK --type=physical parent={{ ovn_uplink_iface }} --target={{ item }}
       loop: "{{ groups['microcloud'] }}"
-      failed_when: false
-      when: ovn_uplink_state.stdout | trim != 'CREATED'
+      register: uplink_target_create
+      changed_when: uplink_target_create.rc == 0
+      failed_when:
+        - uplink_target_create.rc != 0
+        - "'already defined' not in (uplink_target_create.stderr | default(''))"
+      when: not ovn_uplink_created
 
     - name: Finalize OVN UPLINK network cluster-wide if not created
       command: >
@@ -156,19 +164,31 @@
         ipv4.gateway=10.0.1.1/24
         ipv4.ovn.ranges=10.0.1.100-10.0.1.200
         dns.nameservers=8.8.8.8
-      failed_when: false
-      when: ovn_uplink_state.stdout | trim != 'CREATED'
+      register: uplink_finalize
+      changed_when: uplink_finalize.rc == 0
+      failed_when:
+        - uplink_finalize.rc != 0
+        - "'already exists' not in (uplink_finalize.stderr | default(''))"
+      when: not ovn_uplink_created
 
     - name: Read OVN default network state in LXD
-      shell: lxc network list --format csv -c n,s | awk -F, '$1=="default" {print $2}'
-      register: ovn_default_state
+      command: lxc network show default
+      register: ovn_default_show
       changed_when: false
       failed_when: false
 
+    - name: Set OVN default network created flag
+      set_fact:
+        ovn_default_created: "{{ ovn_default_show.rc == 0 and ('status: Created' in ovn_default_show.stdout) }}"
+
     - name: Create OVN default logical network if not created
       command: lxc network create default --type=ovn network=UPLINK ipv6.address=none
-      failed_when: false
-      when: ovn_default_state.stdout | trim != 'CREATED'
+      register: ovn_default_create
+      changed_when: ovn_default_create.rc == 0
+      failed_when:
+        - ovn_default_create.rc != 0
+        - "'already exists' not in (ovn_default_create.stderr | default(''))"
+      when: not ovn_default_created
 
     - name: Verify MicroCloud cluster formed
       command: microcloud cluster list
