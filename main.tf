@@ -8,11 +8,11 @@ terraform {
   required_providers {
     lxd = {
       source  = "terraform-lxd/lxd"
-      version = "~> 2.3.0"
+      version = "~> 2.4.0"
     }
     local = {
       source  = "hashicorp/local"
-      version = "~> 2.4.0"
+      version = "~> 2.5.0"
     }
   }
 }
