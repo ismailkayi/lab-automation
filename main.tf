@@ -1,10 +1,10 @@
 # ==============================================================================
 # CANONICAL LAB INFRASTRUCTURE AS CODE
 # Provider: LXD
-# Orchestration: Terraform + Ansible
+# Orchestration: OpenTofu + Ansible
 # ==============================================================================
 
-terraform {
+tofu {
   required_providers {
     lxd = {
       source  = "terraform-lxd/lxd"
@@ -44,7 +44,7 @@ variable "ssh_public_key" {
 
 locals {
   # Original environment ID for local files (e.g., ismail_microcloud)
-  env_id = terraform.workspace == "default" ? var.user_prefix : terraform.workspace
+  env_id = tofu.workspace == "default" ? var.user_prefix : tofu.workspace
   
   # LXD safe prefix: Replaces underscores with hyphens to strictly comply with LXD naming rules
   # (e.g., "ismail_microcloud" becomes "ismail-microcloud")
