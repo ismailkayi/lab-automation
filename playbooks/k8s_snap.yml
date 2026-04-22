@@ -1,23 +1,28 @@
 ---
-- name: Orchestrate Canonical Kubernetes (Snap)
+- name: Provision Canonical Kubernetes (Snap) Packages
   hosts: k8s_snap
-  gather_facts: false # Do not gather facts until cloud-init finishes
+  gather_facts: false 
   tasks:
-    - name: Wait for cloud-init to finish
-      raw: cloud-init status --wait
-      register: cloud_init
-      changed_when: false
-      retries: 30
-      delay: 10
-      until: cloud_init.rc == 0
+    - name: Wait for LXD VM to boot and become reachable
+      wait_for_connection:
+        timeout: 120
 
-    - name: Ensure k8s snap is installed and available
-      command: snap list k8s
-      register: snap_check
-      until: snap_check.rc == 0
-      retries: 15
-      delay: 10
+    - name: Gather OS facts now that system is up
+      setup:
+
+    - name: Wait for snapd system seed to complete (Ubuntu boot requirement)
+      command: snap wait system seed.loaded
       changed_when: false
+      retries: 10
+      delay: 5
+
+    - name: Install Canonical K8s Snap
+      command: snap install k8s --channel=latest/stable --classic
+      register: snap_install
+      until: snap_install.rc == 0
+      retries: 3
+      delay: 10
+      changed_when: "'installed' in snap_install.stdout or 'k8s' in snap_install.stdout"
 
 - name: Bootstrap Control Plane
   hosts: k8s_snap[0] # Node 1

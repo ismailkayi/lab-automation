@@ -6,7 +6,7 @@
 *.tfstate.*
 
 # Otomatik oluşan inventory
-inventory.ini
+inventory.ini inventory.yaml
 
 # Crash log files
 crash.log

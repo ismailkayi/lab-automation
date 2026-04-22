@@ -1,7 +1,7 @@
 # ==============================================================================
 # CANONICAL LAB INFRASTRUCTURE AS CODE
 # Provider: LXD
-# Orchestration: Terraform + Cloud-init
+# Orchestration: Terraform + Ansible
 # ==============================================================================
 
 terraform {
@@ -41,7 +41,7 @@ resource "lxd_profile" "lab_base" {
   name = "${var.user_prefix}-iac-base"
 
   config = {
-    "security.nesting"    = "true"
+    "security.nesting" = "true"
   }
 
   device {
@@ -78,13 +78,7 @@ resource "lxd_instance" "microcloud_nodes" {
   }
 
   config = {
-    "user.user-data" = <<-EOT
-      #cloud-config
-      package_update: true
-      snap:
-        commands:
-          - snap install lxd microcloud microceph microovn
-    EOT
+    "user.user-data" = "#cloud-config\n"
   }
 }
 
@@ -109,13 +103,7 @@ resource "lxd_instance" "k8s_nodes" {
   }
 
   config = {
-    "user.user-data" = <<-EOT
-      #cloud-config
-      package_update: true
-      snap:
-        commands:
-          - snap install k8s --channel=latest/stable --classic
-    EOT
+    "user.user-data" = "#cloud-config\n"
   }
 }
 
@@ -132,7 +120,7 @@ resource "lxd_instance" "juju_controller" {
   }
 
   config = {
-    "user.user-data" = "#cloud-config\nsnap:\n  commands:\n    - snap install juju --classic"
+    "user.user-data" = "#cloud-config\n"
   }
 }
 
@@ -149,7 +137,7 @@ resource "lxd_instance" "juju_workers" {
   }
 
   config = {
-    "user.user-data" = var.scenario == "juju-ceph" ? "#cloud-config\nsnap:\n  commands:\n    - snap install microceph" : "#cloud-config\n"
+    "user.user-data" = "#cloud-config\n"
   }
 }
 
@@ -162,7 +150,6 @@ resource "lxd_volume" "juju_ceph_disks" {
 }
 
 # --- ANSIBLE INVENTORY GENERATION ---
-# This block uses native YAML encoding, completely eliminating formatting errors.
 resource "local_file" "ansible_inventory" {
   content = yamlencode({
     all = {
