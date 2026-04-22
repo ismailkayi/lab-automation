@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# CANONICAL LAB ORCHESTRATOR RUNNER (Terraform + Ansible)
+# CANONICAL LAB ORCHESTRATOR RUNNER (OpenTofu + Ansible)
 # Phase 2: Multi-Environment, SSH Injection, Interactive Deletion
 # ==============================================================================
 
@@ -21,9 +21,9 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 ensure_tools() {
-    if ! command -v terraform &> /dev/null; then
-        log_info "Installing Terraform..."
-        sudo snap install terraform --classic
+    if ! command -v tofu &> /dev/null; then
+        log_info "Installing OpenTofu..."
+        sudo snap install --classic opentofu
     fi
     if ! command -v ansible &> /dev/null; then
         log_info "Installing Ansible..."
@@ -43,7 +43,7 @@ ensure_tools() {
 
 destroy_menu() {
     # Get active workspaces (ignoring default)
-    mapfile -t envs < <(terraform workspace list | tr -d '* ' | grep -v '^default$')
+    mapfile -t envs < <(tofu workspace list | tr -d '* ' | grep -v '^default$')
     
     if [ ${#envs[@]} -eq 0 ]; then
         echo -e "${YELLOW}No active lab environments (workspaces) found to delete.${NC}"
@@ -73,11 +73,11 @@ destroy_menu() {
 
     log_warn "Warning! Destroying environment: ${selected_env}..."
     
-    terraform workspace select "$selected_env" >/dev/null 2>&1
-    terraform destroy -auto-approve -var="user_prefix=${env_prefix}" -var="scenario=${env_scenario}"
+    tofu workspace select "$selected_env" >/dev/null 2>&1
+    tofu destroy -auto-approve -var="user_prefix=${env_prefix}" -var="scenario=${env_scenario}"
     
-    terraform workspace select default >/dev/null 2>&1
-    terraform workspace delete "$selected_env" >/dev/null 2>&1
+    tofu workspace select default >/dev/null 2>&1
+    tofu workspace delete "$selected_env" >/dev/null 2>&1
     
     rm -f "inventory_${selected_env}.yaml"
     
@@ -86,11 +86,11 @@ destroy_menu() {
 
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}    CANONICAL IaC DEPLOYMENT ENGINE (TF + ANSIBLE)        ${NC}"
+echo -e "${CYAN}    CANONICAL IaC DEPLOYMENT ENGINE (TOFU + ANSIBLE)       ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 
 ensure_tools
-terraform init -v >/dev/null 2>&1
+tofu init -v >/dev/null 2>&1
 
 echo ""
 echo "1) Deploy k8s-snap (3 Node Canonical Kubernetes)"
@@ -115,11 +115,11 @@ esac
 workspace_name="${user_prefix}_${scenario}"
 inventory_file="inventory_${workspace_name}.yaml"
 
-log_info "Setting up Terraform workspace: ${workspace_name}..."
-terraform workspace select "$workspace_name" 2>/dev/null || terraform workspace new "$workspace_name"
+log_info "Setting up OpenTofu workspace: ${workspace_name}..."
+tofu workspace select "$workspace_name" 2>/dev/null || tofu workspace new "$workspace_name"
 
-log_info "Provisioning infrastructure with Terraform..."
-terraform apply -auto-approve -var="user_prefix=${user_prefix}" -var="scenario=${scenario}"
+log_info "Provisioning infrastructure with OpenTofu..."
+tofu apply -auto-approve -var="user_prefix=${user_prefix}" -var="scenario=${scenario}"
 
 if [[ "$scenario" == "k8s-snap" ]]; then
     log_info "Running Ansible Orchestration for K8s..."
