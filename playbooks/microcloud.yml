@@ -65,8 +65,7 @@
       # ansible_default_ipv4.address gives e.g. "10.88.0.10"
       # We strip the last octet and append ".0/24" → "10.88.0.0/24"
       set_fact:
-        lookup_subnet: "{{ ansible_default_ipv4.address.split('.')[:-1] | join('.') + '.0/24' }}"
-
+        lookup_subnet: "{{ ansible_facts['default_ipv4']['address'].split('.')[:-1] | join('.') + '.0/24' }}"
     - name: Write MicroCloud preseed file to /tmp
       copy:
         dest: /tmp/microcloud-preseed.yaml
@@ -95,9 +94,7 @@
       register: preseed_content
 
     - name: Run microcloud init with preseed (cluster bootstrap)
-      command: microcloud init --preseed
-      args:
-        stdin: "{{ preseed_content.content | b64decode }}"
+      command: microcloud init --preseed-file /tmp/microcloud-preseed.yaml
       register: microcloud_init
       changed_when: microcloud_init.rc == 0
 
