@@ -17,7 +17,7 @@
       delay: 5
 
     - name: Install Canonical K8s Snap
-      command: snap install k8s --channel=latest/stable --classic
+      command: snap install k8s --channel=1.32-classic/stable --classic
       register: snap_install
       until: snap_install.rc == 0
       retries: 3
@@ -27,23 +27,13 @@
 - name: Bootstrap Control Plane
   hosts: k8s_snap[0] # Node 1
   tasks:
-    - name: Check if cluster is already bootstrapped
-      stat:
-        path: /var/snap/k8s/current/certs/ca.crt
-      register: k8s_ca
-
     - name: Run k8s bootstrap
       command: k8s bootstrap
-      when: not k8s_ca.stat.exists
-
-    - name: Generate join token for workers
-      command: k8s add-node
-      register: join_cmd_output
-      changed_when: true
-
-    - name: Parse join token
-      set_fact:
-        k8s_join_command: "{{ join_cmd_output.stdout_lines[-1] }}"
+      register: bootstrap_out
+      failed_when: 
+        - bootstrap_out.rc != 0
+        - "'already part of a cluster' not in bootstrap_out.stderr"
+      changed_when: bootstrap_out.rc == 0
 
 - name: Join Worker Nodes
   hosts: k8s_snap[1:] # Node 2 & 3
@@ -54,6 +44,14 @@
       failed_when: false
       changed_when: false
 
-    - name: Run k8s join
-      command: "{{ hostvars[groups['k8s_snap'][0]]['k8s_join_command'] }}"
-      when: "'Not Ready' in k8s_status.stdout or k8s_status.rc != 0"
+    - name: Generate join token for this specific worker on Control Plane
+      # Burada Ansible'a: "Bu komutu Node 1'de (Control Plane) çalıştır ama benim ismime (inventory_hostname) özel token üret" diyoruz.
+      command: "k8s get-join-token {{ inventory_hostname }} --worker"
+      delegate_to: "{{ groups['k8s_snap'][0] }}"
+      register: join_token_output
+      when: k8s_status.rc != 0 or 'Not Ready' in k8s_status.stdout
+      changed_when: false
+
+    - name: Join the cluster
+      command: "k8s join-cluster {{ join_token_output.stdout | trim }}"
+      when: k8s_status.rc != 0 or 'Not Ready' in k8s_status.stdout
