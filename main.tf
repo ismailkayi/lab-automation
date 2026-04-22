@@ -37,8 +37,22 @@ variable "ubuntu_image" {
   default     = "ubuntu:24.04"
 }
 
+variable "ssh_public_key" {
+  description = "Host SSH public key to inject into VMs for access"
+  type        = string
+}
+
+locals {
+  # Original environment ID for local files (e.g., ismail_microcloud)
+  env_id = terraform.workspace == "default" ? var.user_prefix : terraform.workspace
+  
+  # LXD safe prefix: Replaces underscores with hyphens to strictly comply with LXD naming rules
+  # (e.g., "ismail_microcloud" becomes "ismail-microcloud")
+  lxd_prefix = replace(local.env_id, "_", "-")
+}
+
 resource "lxd_profile" "lab_base" {
-  name = "${var.user_prefix}-iac-base"
+  name = "${local.lxd_prefix}-iac-base"
 
   config = {
     "security.nesting" = "true"
@@ -65,9 +79,30 @@ resource "lxd_profile" "lab_base" {
 
 # --- SCENARIOS ---
 
+# Network without IP for MicroOVN (Uplink)
+resource "lxd_network" "ovn_uplink" {
+  count = var.scenario == "microcloud" ? 1 : 0
+  # Limit network name to 15 characters to avoid LXD bridge name limits
+  name  = "mc-${substr(local.lxd_prefix, 0, 8)}-up"
+  type  = "bridge"
+  config = {
+    "ipv4.address" = "none"
+    "ipv6.address" = "none"
+  }
+}
+
+# Additional disks for MicroCeph
+resource "lxd_volume" "microcloud_ceph_disks" {
+  count        = var.scenario == "microcloud" ? 3 : 0
+  name         = "${local.lxd_prefix}-ceph-${count.index + 1}"
+  pool         = "default"
+  content_type = "block"
+  config       = { size = "50GiB" }
+}
+
 resource "lxd_instance" "microcloud_nodes" {
   count    = var.scenario == "microcloud" ? 3 : 0
-  name     = "${var.user_prefix}-microcloud-${count.index + 1}"
+  name     = "${local.lxd_prefix}-node-${count.index + 1}"
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
@@ -77,22 +112,39 @@ resource "lxd_instance" "microcloud_nodes" {
     memory = "4GiB"
   }
 
+  # Second Network Interface (MicroOVN)
+  device {
+    name = "eth1"
+    type = "nic"
+    properties = {
+      network = lxd_network.ovn_uplink[0].name
+    }
+  }
+
+  # Additional Disk Attachment (MicroCeph)
+  device {
+    name = "ceph-disk"
+    type = "disk"
+    properties = {
+      source = lxd_volume.microcloud_ceph_disks[count.index].name
+      pool   = "default"
+    }
+  }
+
+  # SSH Key Injection
   config = {
-    "user.user-data" = "#cloud-config\n"
+    "user.user-data" = <<-EOT
+      #cloud-config
+      ssh_authorized_keys:
+        - ${var.ssh_public_key}
+    EOT
   }
 }
 
-resource "lxd_volume" "microcloud_ceph_disks" {
-  count = var.scenario == "microcloud" ? 3 : 0
-  name  = "${var.user_prefix}-microcloud-ceph-${count.index + 1}"
-  pool  = "default"
-  type  = "block"
-  config = { size = "50GiB" }
-}
-
+# --- K8S SNAP NODES ---
 resource "lxd_instance" "k8s_nodes" {
   count    = var.scenario == "k8s-snap" ? 3 : 0
-  name     = "${var.user_prefix}-k8s-${count.index + 1}"
+  name     = "${local.lxd_prefix}-k8s-${count.index + 1}"
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
@@ -103,53 +155,16 @@ resource "lxd_instance" "k8s_nodes" {
   }
 
   config = {
-    "user.user-data" = "#cloud-config\n"
+    "user.user-data" = <<-EOT
+      #cloud-config
+      ssh_authorized_keys:
+        - ${var.ssh_public_key}
+    EOT
   }
-}
-
-resource "lxd_instance" "juju_controller" {
-  count    = contains(["juju-k8s", "juju-ceph"], var.scenario) ? 1 : 0
-  name     = "${var.user_prefix}-juju-controller"
-  image    = var.ubuntu_image
-  type     = "virtual-machine"
-  profiles = [lxd_profile.lab_base.name]
-  
-  limits = {
-    cpu    = "4"
-    memory = "8GiB"
-  }
-
-  config = {
-    "user.user-data" = "#cloud-config\n"
-  }
-}
-
-resource "lxd_instance" "juju_workers" {
-  count    = contains(["juju-k8s", "juju-ceph"], var.scenario) ? 3 : 0
-  name     = "${var.user_prefix}-juju-worker-${count.index + 1}"
-  image    = var.ubuntu_image
-  type     = "virtual-machine"
-  profiles = [lxd_profile.lab_base.name]
-  
-  limits = {
-    cpu    = "2"
-    memory = "4GiB"
-  }
-
-  config = {
-    "user.user-data" = "#cloud-config\n"
-  }
-}
-
-resource "lxd_volume" "juju_ceph_disks" {
-  count = var.scenario == "juju-ceph" ? 3 : 0
-  name  = "${var.user_prefix}-juju-ceph-${count.index + 1}"
-  pool  = "default"
-  type  = "block"
-  config = { size = "50GiB" }
 }
 
 # --- ANSIBLE INVENTORY GENERATION ---
+# Each environment creates its own inventory file to prevent conflicts
 resource "local_file" "ansible_inventory" {
   content = yamlencode({
     all = {
@@ -160,15 +175,10 @@ resource "local_file" "ansible_inventory" {
         k8s_snap = {
           hosts = { for name in lxd_instance.k8s_nodes[*].name : name => { ansible_connection = "lxd" } }
         }
-        juju_controller = {
-          hosts = { for name in lxd_instance.juju_controller[*].name : name => { ansible_connection = "lxd" } }
-        }
-        juju_workers = {
-          hosts = { for name in lxd_instance.juju_workers[*].name : name => { ansible_connection = "lxd" } }
-        }
       }
     }
   })
-  filename        = "${path.module}/inventory.yaml"
+  # We keep the filename aligned with the workspace name (env_id) so orchestrate.sh can find it
+  filename        = "${path.module}/inventory_${local.env_id}.yaml"
   file_permission = "0644"
 }
