@@ -1,0 +1,13 @@
+# Local .terraform directories
+**/.terraform/*
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+
+# Otomatik oluşan inventory
+inventory.ini
+
+# Crash log files
+crash.log
+crash.*.log
