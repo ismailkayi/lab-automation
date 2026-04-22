@@ -127,7 +127,8 @@ if [[ "$scenario" == "k8s-snap" ]]; then
     log_success "K8s Lab Deployed Successfully!"
     log_info "To access the machines, run: ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
 elif [[ "$scenario" == "microcloud" ]]; then
-    log_success "MicroCloud infrastructure is ready! (Nodes, OVN Network, and Ceph Disks added)"
+    log_info "Running Ansible Orchestration for MicroCloud..."
+    ansible-playbook -i "$inventory_file" playbooks/microcloud.yml
+    log_success "MicroCloud Lab Deployed Successfully!"
     log_info "To access the machines, run: ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
-    # MicroCloud init Ansible playbook execution will be added here
 fi
