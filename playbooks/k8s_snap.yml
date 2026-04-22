@@ -1,0 +1,54 @@
+---
+- name: Orchestrate Canonical Kubernetes (Snap)
+  hosts: k8s_snap
+  gather_facts: false # Do not gather facts until cloud-init finishes
+  tasks:
+    - name: Wait for cloud-init to finish
+      raw: cloud-init status --wait
+      register: cloud_init
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: cloud_init.rc == 0
+
+    - name: Ensure k8s snap is installed and available
+      command: snap list k8s
+      register: snap_check
+      until: snap_check.rc == 0
+      retries: 15
+      delay: 10
+      changed_when: false
+
+- name: Bootstrap Control Plane
+  hosts: k8s_snap[0] # Node 1
+  tasks:
+    - name: Check if cluster is already bootstrapped
+      stat:
+        path: /var/snap/k8s/current/certs/ca.crt
+      register: k8s_ca
+
+    - name: Run k8s bootstrap
+      command: k8s bootstrap
+      when: not k8s_ca.stat.exists
+
+    - name: Generate join token for workers
+      command: k8s add-node
+      register: join_cmd_output
+      changed_when: true
+
+    - name: Parse join token
+      set_fact:
+        k8s_join_command: "{{ join_cmd_output.stdout_lines[-1] }}"
+
+- name: Join Worker Nodes
+  hosts: k8s_snap[1:] # Node 2 & 3
+  tasks:
+    - name: Check if node is already joined
+      command: k8s status
+      register: k8s_status
+      failed_when: false
+      changed_when: false
+
+    - name: Run k8s join
+      command: "{{ hostvars[groups['k8s_snap'][0]]['k8s_join_command'] }}"
+      when: "'Not Ready' in k8s_status.stdout or k8s_status.rc != 0"
