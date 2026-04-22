@@ -21,41 +21,22 @@
       retries: 10
       delay: 5
 
-    - name: Install microcloud snap
-      command: snap install microcloud --channel=2/stable
-      register: snap_microcloud
-      until: snap_microcloud.rc == 0
-      retries: 3
-      delay: 10
-      changed_when: "'already installed' not in snap_microcloud.stderr"
+    - name: Check required snaps
+      command: snap list {{ item.name }}
+      loop:
+        - { name: 'microcloud', channel: '2/stable' }
+        - { name: 'microceph', channel: 'squid/stable' }
+        - { name: 'microovn', channel: '24.03/stable' }
+        - { name: 'lxd', channel: '5.21/stable' }
+      register: snap_checks
+      changed_when: false
+      failed_when: false
 
-    - name: Install microceph snap
-      command: snap install microceph --channel=squid/stable
-      register: snap_microceph
-      until: snap_microceph.rc == 0
-      retries: 3
-      delay: 10
-      changed_when: "'already installed' not in snap_microceph.stderr"
-
-    - name: Install microovn snap
-      command: snap install microovn --channel=24.03/stable
-      register: snap_microovn
-      until: snap_microovn.rc == 0
-      retries: 3
-      delay: 10
-      changed_when: "'already installed' not in snap_microovn.stderr"
-
-    - name: Install lxd snap (may already be present)
-      command: snap install lxd --channel=5.21/stable
-      register: snap_lxd
-      until: snap_lxd.rc == 0
-      retries: 3
-      delay: 10
-      # lxd is pre-installed on Ubuntu VMs, treat "already installed" as success
-      failed_when:
-        - snap_lxd.rc != 0
-        - "'already installed' not in snap_lxd.stderr"
-      changed_when: "'already installed' not in snap_lxd.stderr"
+    - name: Install missing snaps only
+      command: snap install {{ item.item.name }} --channel={{ item.item.channel }}
+      loop: "{{ snap_checks.results }}"
+      when: item.rc != 0
+      changed_when: true
 
 # --- Bootstrap the MicroCloud cluster from the first node ---
 - name: Bootstrap MicroCloud Cluster (Node 1)
@@ -149,52 +130,47 @@
       async_status:
         jid: "{{ item.ansible_job_id }}"
       delegate_to: "{{ item.item }}"
-      loop: "{{ joiner_preseed_jobs.results | default([]) }}"
+      loop: "{{ (joiner_preseed_jobs.results | default([])) | selectattr('ansible_job_id', 'defined') | list }}"
       register: joiner_preseed_result
       until: joiner_preseed_result.finished
       retries: 120
       delay: 5
       changed_when: false
-      when: joiner_preseed_jobs is defined and joiner_preseed_jobs.results | default([]) | length > 0
+      when: joiner_preseed_jobs is defined and ((joiner_preseed_jobs.results | default([])) | selectattr('ansible_job_id', 'defined') | list | length) > 0
 
-    - name: Check if OVN UPLINK network exists in LXD
-      command: lxc network show UPLINK
-      register: ovn_uplink_check
+    - name: Read OVN UPLINK network state in LXD
+      shell: lxc network list --format csv -c n,s | awk -F, '$1=="UPLINK" {print $2}'
+      register: ovn_uplink_state
       changed_when: false
       failed_when: false
 
-    - name: Create OVN UPLINK network per node (target step)
+    - name: Create or complete OVN UPLINK target config on each node
       command: lxc network create UPLINK --type=physical parent={{ ovn_uplink_iface }} --target={{ item }}
       loop: "{{ groups['microcloud'] }}"
-      changed_when: true
       failed_when: false
-      when: ovn_uplink_check.rc != 0
+      when: ovn_uplink_state.stdout | trim != 'CREATED'
 
-    - name: Finalize OVN UPLINK network cluster-wide
+    - name: Finalize OVN UPLINK network cluster-wide if not created
       command: >
         lxc network create UPLINK --type=physical
         ipv4.gateway=10.0.1.1/24
         ipv4.ovn.ranges=10.0.1.100-10.0.1.200
         dns.nameservers=8.8.8.8
-      changed_when: true
-      when: ovn_uplink_check.rc != 0
+      failed_when: false
+      when: ovn_uplink_state.stdout | trim != 'CREATED'
 
-    - name: Check if OVN default network exists in LXD
-      command: lxc network show default
-      register: ovn_default_check
+    - name: Read OVN default network state in LXD
+      shell: lxc network list --format csv -c n,s | awk -F, '$1=="default" {print $2}'
+      register: ovn_default_state
       changed_when: false
       failed_when: false
 
-    - name: Create OVN default logical network
+    - name: Create OVN default logical network if not created
       command: lxc network create default --type=ovn network=UPLINK ipv6.address=none
-      changed_when: true
-      when: ovn_default_check.rc != 0
+      failed_when: false
+      when: ovn_default_state.stdout | trim != 'CREATED'
 
     - name: Verify MicroCloud cluster formed
       command: microcloud cluster list
       register: cluster_list
       changed_when: false
-
-    - name: Show cluster members
-      debug:
-        msg: "{{ cluster_list.stdout_lines }}"

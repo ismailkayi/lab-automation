@@ -20,6 +20,42 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
+print_microcloud_summary() {
+    local ws_name="$1"
+    local lxd_prefix="${ws_name//_/-}"
+    local first_node=""
+    local health="UNKNOWN"
+
+    mapfile -t nodes < <(lxc list --format csv -c n | grep "^${lxd_prefix}-node-" || true)
+
+    if [[ ${#nodes[@]} -eq 0 ]]; then
+        log_warn "Could not find MicroCloud nodes for summary output."
+        return
+    fi
+
+    first_node="${nodes[0]}"
+    health=$(lxc exec "$first_node" -- microcloud status 2>/dev/null | awk '/Status:/ {print $2; exit}')
+    health="${health:-UNKNOWN}"
+
+    log_info "MicroCloud lab is ready."
+    log_info "Health: ${health}"
+    log_info "Cluster nodes:"
+
+    for node in "${nodes[@]}"; do
+        ip=$(lxc list "$node" --format csv -c 4 | sed -E 's/ .*//' | cut -d'/' -f1)
+        ip="${ip:-N/A}"
+        log_info "- ${node} (${ip})"
+    done
+
+    log_info "UI access links:"
+    for node in "${nodes[@]}"; do
+        ip=$(lxc list "$node" --format csv -c 4 | sed -E 's/ .*//' | cut -d'/' -f1)
+        if [[ -n "$ip" ]]; then
+            log_info "- https://${ip}:8443"
+        fi
+    done
+}
+
 ensure_tools() {
     if ! command -v tofu &> /dev/null; then
         log_info "Installing OpenTofu..."
@@ -130,5 +166,6 @@ elif [[ "$scenario" == "microcloud" ]]; then
     log_info "Running Ansible Orchestration for MicroCloud..."
     ansible-playbook -i "$inventory_file" playbooks/microcloud.yml
     log_success "MicroCloud Lab Deployed Successfully!"
+    print_microcloud_summary "$workspace_name"
     log_info "To access the machines, run: ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
 fi
