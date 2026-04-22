@@ -50,7 +50,7 @@ case $action in
         terraform apply -auto-approve -var="user_prefix=${user_prefix}" -var="scenario=k8s-snap"
         
         log_info "Running Ansible Orchestration for K8s..."
-        ansible-playbook -i inventory.ini playbooks/k8s_snap.yml
+        ansible-playbook -i inventory.yaml playbooks/k8s_snap.yml
         
         log_success "K8s Lab Deployed Successfully!"
         ;;

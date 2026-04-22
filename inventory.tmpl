@@ -1,1 +1,0 @@
-[microcloud]%{ for name in microcloud_nodes ~}${name} ansible_connection=lxd%{ endfor ~}[k8s_snap]%{ for name in k8s_nodes ~}${name} ansible_connection=lxd%{ endfor ~}[juju_controller]%{ for name in juju_controller ~}${name} ansible_connection=lxd%{ endfor ~}[juju_workers]%{ for name in juju_workers ~}${name} ansible_connection=lxd%{ endfor ~}

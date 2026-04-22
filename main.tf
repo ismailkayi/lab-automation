@@ -42,7 +42,6 @@ resource "lxd_profile" "lab_base" {
 
   config = {
     "security.nesting"    = "true"
-    "security.secureboot" = "false"
   }
 
   device {
@@ -73,9 +72,12 @@ resource "lxd_instance" "microcloud_nodes" {
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
 
+  limits = {
+    cpu    = "2"
+    memory = "4GiB"
+  }
+
   config = {
-    "limits.cpu"    = "2"
-    "limits.memory" = "4GiB"
     "user.user-data" = <<-EOT
       #cloud-config
       package_update: true
@@ -101,9 +103,12 @@ resource "lxd_instance" "k8s_nodes" {
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
 
+  limits = {
+    cpu    = "2"
+    memory = "4GiB"
+  }
+
   config = {
-    "limits.cpu"    = "2"
-    "limits.memory" = "4GiB"
     "user.user-data" = <<-EOT
       #cloud-config
       package_update: true
@@ -120,9 +125,13 @@ resource "lxd_instance" "juju_controller" {
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
+  
+  limits = {
+    cpu    = "4"
+    memory = "8GiB"
+  }
+
   config = {
-    "limits.cpu"    = "4"
-    "limits.memory" = "8GiB"
     "user.user-data" = "#cloud-config\nsnap:\n  commands:\n    - snap install juju --classic"
   }
 }
@@ -133,9 +142,13 @@ resource "lxd_instance" "juju_workers" {
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
+  
+  limits = {
+    cpu    = "2"
+    memory = "4GiB"
+  }
+
   config = {
-    "limits.cpu"    = "2"
-    "limits.memory" = "4GiB"
     "user.user-data" = var.scenario == "juju-ceph" ? "#cloud-config\nsnap:\n  commands:\n    - snap install microceph" : "#cloud-config\n"
   }
 }
@@ -149,13 +162,26 @@ resource "lxd_volume" "juju_ceph_disks" {
 }
 
 # --- ANSIBLE INVENTORY GENERATION ---
-# This block automatically writes the instance names into an Ansible inventory file.
+# This block uses native YAML encoding, completely eliminating formatting errors.
 resource "local_file" "ansible_inventory" {
-  content = templatefile("${path.module}/inventory.tmpl", {
-    microcloud_nodes = lxd_instance.microcloud_nodes[*].name
-    k8s_nodes        = lxd_instance.k8s_nodes[*].name
-    juju_controller  = lxd_instance.juju_controller[*].name
-    juju_workers     = lxd_instance.juju_workers[*].name
+  content = yamlencode({
+    all = {
+      children = {
+        microcloud = {
+          hosts = { for name in lxd_instance.microcloud_nodes[*].name : name => { ansible_connection = "lxd" } }
+        }
+        k8s_snap = {
+          hosts = { for name in lxd_instance.k8s_nodes[*].name : name => { ansible_connection = "lxd" } }
+        }
+        juju_controller = {
+          hosts = { for name in lxd_instance.juju_controller[*].name : name => { ansible_connection = "lxd" } }
+        }
+        juju_workers = {
+          hosts = { for name in lxd_instance.juju_workers[*].name : name => { ansible_connection = "lxd" } }
+        }
+      }
+    }
   })
-  filename = "${path.module}/inventory.ini"
+  filename        = "${path.module}/inventory.yaml"
+  file_permission = "0644"
 }

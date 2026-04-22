@@ -1,0 +1,16 @@
+"all":
+  "children":
+    "juju_controller":
+      "hosts": {}
+    "juju_workers":
+      "hosts": {}
+    "k8s_snap":
+      "hosts":
+        "ismail-k8s-1":
+          "ansible_connection": "lxd"
+        "ismail-k8s-2":
+          "ansible_connection": "lxd"
+        "ismail-k8s-3":
+          "ansible_connection": "lxd"
+    "microcloud":
+      "hosts": {}
