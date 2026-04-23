@@ -20,6 +20,7 @@ This project needs these tools on the host:
 - LXD
 - OpenTofu
 - Ansible
+- the `community.general` Ansible collection
 
 You have two ways to continue:
 
@@ -28,6 +29,7 @@ You have two ways to continue:
 Run:
 
 ```bash
+chmod +x prep_host.sh
 ./prep_host.sh
 ```
 
@@ -54,9 +56,7 @@ If your host is already ready, you can skip `prep_host.sh` and run the main depl
 From the repository directory:
 
 ```bash
-
 chmod +x orchestrate.sh
-
 ./orchestrate.sh
 ```
 
@@ -68,13 +68,10 @@ You will then choose one of these options:
 3) Destroy Environments
 ```
 
-The lab SSH key used by the project is:
-
-- `~/.ssh/id_rsa_lab`
 
 ## How Naming Works
 
-You enter a simple lab prefix such as:
+You will be asked to enter a simple lab prefix such as:
 
 ```text
 mylab
@@ -114,7 +111,7 @@ At the end of a successful deployment, the script prints:
 
 ### Existing Kubernetes Lab
 
-If the lab name already exists, the script shows the current topology and asks what to do:
+Existing labs are listed whenever you choose a deploy option. If the lab name already exists, the script shows the current topology and asks what to do:
 
 - `add`: expand the cluster
 - `rebuild`: destroy and recreate the cluster
