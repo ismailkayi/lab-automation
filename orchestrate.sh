@@ -129,9 +129,6 @@ print_microcloud_summary() {
     local lxd_prefix="${ws_name//_/-}"
     local first_node=""
     local health="UNKNOWN"
-    local token_identity_name=""
-    local token_output=""
-    local ui_token=""
 
     mapfile -t nodes < <(lxc list --format csv -c n | grep "^${lxd_prefix}-node-" || true)
 
@@ -161,17 +158,6 @@ print_microcloud_summary() {
             log_info "- https://${ip}:8443"
         fi
     done
-
-    token_identity_name="lxd-ui-$(date +%s)"
-    token_output=$(lxc exec "$first_node" -- sh -c "lxc auth identity create tls/${token_identity_name} --group admins" 2>/dev/null || true)
-    ui_token=$(echo "$token_output" | awk '/pending identity token:/{getline; print; exit}')
-
-    if [[ -n "$ui_token" ]]; then
-        log_info "One-time LXD UI token:"
-        log_info "$ui_token"
-    else
-        log_warn "Could not auto-generate LXD UI token on ${first_node}."
-    fi
 }
 
 print_k8s_summary() {
