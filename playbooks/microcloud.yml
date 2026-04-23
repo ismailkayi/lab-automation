@@ -53,7 +53,7 @@
       # We find the first interface that has no IPv4 address and is not lo or
       # the primary (default-route) interface — portable across any LXD VM shape.
       shell: |
-        primary="{{ ansible_default_ipv4.interface }}"
+        primary="{{ ansible_facts['default_ipv4']['interface'] }}"
         for iface in $(ip -o link show | awk -F': ' '!/lo/ {print $2}' | cut -d'@' -f1); do
           [ "$iface" = "$primary" ] && continue
           ip -4 addr show "$iface" | grep -q 'inet ' || { echo "$iface"; break; }

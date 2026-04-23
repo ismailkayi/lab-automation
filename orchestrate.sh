@@ -81,9 +81,33 @@ destroy_environment() {
     fi
 
     tofu destroy "${destroy_args[@]}"
+
+    if [[ "$env_scenario" == "microcloud" ]]; then
+        cleanup_microcloud_orphans "$env_name"
+    fi
+
     tofu workspace select default >/dev/null 2>&1
     tofu workspace delete "$env_name" >/dev/null 2>&1
     rm -f "inventory_${env_name}.yaml"
+}
+
+cleanup_microcloud_orphans() {
+    local env_name="$1"
+    local lxd_prefix="${env_name//_/-}"
+    local uplink_network="mc-${lxd_prefix:0:8}-up"
+    local profile_name="${lxd_prefix}-iac-base"
+
+    # If provider state is inconsistent, these resources can remain orphaned.
+    for i in 1 2 3; do
+        lxc delete -f "${lxd_prefix}-node-${i}" >/dev/null 2>&1 || true
+    done
+
+    for i in 1 2 3; do
+        lxc storage volume delete default "${lxd_prefix}-ceph-${i}" >/dev/null 2>&1 || true
+    done
+
+    lxc network delete "$uplink_network" >/dev/null 2>&1 || true
+    lxc profile delete "$profile_name" >/dev/null 2>&1 || true
 }
 
 get_node_primary_ip() {
@@ -105,6 +129,9 @@ print_microcloud_summary() {
     local lxd_prefix="${ws_name//_/-}"
     local first_node=""
     local health="UNKNOWN"
+    local token_identity_name=""
+    local token_output=""
+    local ui_token=""
 
     mapfile -t nodes < <(lxc list --format csv -c n | grep "^${lxd_prefix}-node-" || true)
 
@@ -134,6 +161,17 @@ print_microcloud_summary() {
             log_info "- https://${ip}:8443"
         fi
     done
+
+    token_identity_name="lxd-ui-$(date +%s)"
+    token_output=$(lxc exec "$first_node" -- sh -c "lxc auth identity create tls/${token_identity_name} --group admins" 2>/dev/null || true)
+    ui_token=$(echo "$token_output" | awk '/pending identity token:/{getline; print; exit}')
+
+    if [[ -n "$ui_token" ]]; then
+        log_info "One-time LXD UI token:"
+        log_info "$ui_token"
+    else
+        log_warn "Could not auto-generate LXD UI token on ${first_node}."
+    fi
 }
 
 print_k8s_summary() {
@@ -401,6 +439,12 @@ if [[ "$scenario" == "k8s-snap" ]]; then
         -var="k8s_worker_count=${k8s_worker_count}"
     )
     log_info "K8s topology: ${k8s_control_plane_count} control-plane node(s), ${k8s_worker_count} worker-only node(s)"
+elif [[ "$scenario" == "microcloud" ]]; then
+    # Work around intermittent terraform-lxd provider state race during
+    # concurrent volume creation by applying MicroCloud resources serially.
+    tofu_apply_args+=(
+        -parallelism=1
+    )
 fi
 
 tofu apply "${tofu_apply_args[@]}"
