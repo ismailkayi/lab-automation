@@ -1,7 +1,7 @@
 ---
 - name: Provision Canonical Kubernetes (Snap) Packages
   hosts: k8s_snap
-  gather_facts: false 
+  gather_facts: false
   tasks:
     - name: Wait for LXD VM to boot and become reachable
       wait_for_connection:
@@ -16,42 +16,113 @@
       retries: 10
       delay: 5
 
-    - name: Install Canonical K8s Snap
+    - name: Check Canonical K8s snap
+      command: snap list k8s
+      register: snap_check_k8s
+      changed_when: false
+      failed_when: false
+
+    - name: Install Canonical K8s snap if missing
       command: snap install k8s --channel=1.32-classic/stable --classic
-      register: snap_install
-      until: snap_install.rc == 0
-      retries: 3
-      delay: 10
-      changed_when: "'installed' in snap_install.stdout or 'k8s' in snap_install.stdout"
+      when: snap_check_k8s.rc != 0
+      changed_when: true
 
 - name: Bootstrap Control Plane
-  hosts: k8s_snap[0] # Node 1
+  hosts: k8s_control_plane[0]
   tasks:
-    - name: Run k8s bootstrap
-      command: k8s bootstrap
-      register: bootstrap_out
-      failed_when: 
-        - bootstrap_out.rc != 0
-        - "'already part of a cluster' not in bootstrap_out.stderr"
-      changed_when: bootstrap_out.rc == 0
-
-- name: Join Worker Nodes
-  hosts: k8s_snap[1:] # Node 2 & 3
-  tasks:
-    - name: Check if node is already joined
+    - name: Check control-plane node status
       command: k8s status
-      register: k8s_status
+      register: cp0_status
       failed_when: false
       changed_when: false
 
-    - name: Generate join token for this specific worker on Control Plane
-      # Burada Ansible'a: "Bu komutu Node 1'de (Control Plane) çalıştır ama benim ismime (inventory_hostname) özel token üret" diyoruz.
+    - name: Run k8s bootstrap on first control-plane node
+      command: k8s bootstrap
+      register: bootstrap_out
+      failed_when:
+        - bootstrap_out.rc != 0
+        - "'already part of a cluster' not in bootstrap_out.stderr"
+      changed_when: bootstrap_out.rc == 0
+      when: cp0_status.rc != 0 or 'Not Ready' in cp0_status.stdout
+
+- name: Join Additional Control-Plane Nodes
+  hosts: k8s_control_plane[1:]
+  serial: 1
+  tasks:
+    - name: Check if control-plane node is already joined
+      command: k8s status
+      register: cp_status
+      failed_when: false
+      changed_when: false
+
+    - name: Generate join token for control-plane node
+      command: "k8s get-join-token {{ inventory_hostname }}"
+      delegate_to: "{{ groups['k8s_control_plane'][0] }}"
+      register: cp_join_token_output
+      when: cp_status.rc != 0 or 'Not Ready' in cp_status.stdout
+      changed_when: false
+
+    - name: Join control-plane node to cluster
+      command: "k8s join-cluster {{ cp_join_token_output.stdout | trim }}"
+      register: cp_join_result
+      retries: 5
+      delay: 15
+      until: cp_join_result.rc == 0
+      failed_when:
+        - cp_join_result.rc != 0
+        - "'already part of a cluster' not in (cp_join_result.stderr | default(''))"
+      changed_when: cp_join_result.rc == 0
+      when: cp_status.rc != 0 or 'Not Ready' in cp_status.stdout
+
+- name: Join Worker Nodes
+  hosts: k8s_workers
+  tasks:
+    - name: Check if worker node is already registered in cluster
+      command: "k8s kubectl get node {{ inventory_hostname }} --no-headers"
+      delegate_to: "{{ groups['k8s_control_plane'][0] }}"
+      register: worker_node_state
+      failed_when: false
+      changed_when: false
+
+    - name: Generate join token for worker node
       command: "k8s get-join-token {{ inventory_hostname }} --worker"
-      delegate_to: "{{ groups['k8s_snap'][0] }}"
+      delegate_to: "{{ groups['k8s_control_plane'][0] }}"
       register: join_token_output
-      when: k8s_status.rc != 0 or 'Not Ready' in k8s_status.stdout
+      when: worker_node_state.rc != 0 or ' Ready ' not in worker_node_state.stdout
       changed_when: false
 
     - name: Join the cluster
       command: "k8s join-cluster {{ join_token_output.stdout | trim }}"
-      when: k8s_status.rc != 0 or 'Not Ready' in k8s_status.stdout
+      register: worker_join_result
+      retries: 3
+      delay: 10
+      until: worker_join_result.rc == 0 or 'already part of a cluster' in (worker_join_result.stderr | default(''))
+      failed_when:
+        - worker_join_result.rc != 0
+        - "'already part of a cluster' not in (worker_join_result.stderr | default(''))"
+      changed_when: worker_join_result.rc == 0
+      when: worker_node_state.rc != 0 or ' Ready ' not in worker_node_state.stdout
+
+- name: Verify Canonical Kubernetes Cluster
+  hosts: k8s_control_plane[0]
+  tasks:
+    - name: Verify cluster status
+      command: k8s status
+      register: final_k8s_status
+      changed_when: false
+
+    - name: Wait until all Kubernetes nodes are Ready
+      command: k8s kubectl get nodes --no-headers
+      register: k8s_nodes_ready_check
+      changed_when: false
+      retries: 24
+      delay: 10
+      until:
+        - k8s_nodes_ready_check.rc == 0
+        - (k8s_nodes_ready_check.stdout_lines | length) == ((groups['k8s_control_plane'] | length) + (groups['k8s_workers'] | length))
+        - "'NotReady' not in k8s_nodes_ready_check.stdout"
+
+    - name: Verify node membership
+      command: k8s kubectl get nodes -o wide
+      register: final_k8s_nodes
+      changed_when: false

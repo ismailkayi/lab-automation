@@ -42,6 +42,28 @@ variable "ssh_public_key" {
   type        = string
 }
 
+variable "k8s_control_plane_count" {
+  description = "Number of Canonical Kubernetes control-plane nodes"
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = contains([1, 3], var.k8s_control_plane_count)
+    error_message = "k8s_control_plane_count must be either 1 or 3."
+  }
+}
+
+variable "k8s_worker_count" {
+  description = "Number of worker-only Canonical Kubernetes nodes"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.k8s_worker_count >= 0
+    error_message = "k8s_worker_count must be 0 or greater."
+  }
+}
+
 locals {
   # Original environment ID for local files (e.g., ismail_microcloud)
   env_id = terraform.workspace == "default" ? var.user_prefix : terraform.workspace
@@ -142,9 +164,30 @@ resource "lxd_instance" "microcloud_nodes" {
 }
 
 # --- K8S SNAP NODES ---
-resource "lxd_instance" "k8s_nodes" {
-  count    = var.scenario == "k8s-snap" ? 3 : 0
-  name     = "${local.lxd_prefix}-k8s-${count.index + 1}"
+resource "lxd_instance" "k8s_control_plane_nodes" {
+  count    = var.scenario == "k8s-snap" ? var.k8s_control_plane_count : 0
+  name     = "${local.lxd_prefix}-k8s-cp-${count.index + 1}"
+  image    = var.ubuntu_image
+  type     = "virtual-machine"
+  profiles = [lxd_profile.lab_base.name]
+
+  limits = {
+    cpu    = "2"
+    memory = "4GiB"
+  }
+
+  config = {
+    "user.user-data" = <<-EOT
+      #cloud-config
+      ssh_authorized_keys:
+        - ${var.ssh_public_key}
+    EOT
+  }
+}
+
+resource "lxd_instance" "k8s_worker_nodes" {
+  count    = var.scenario == "k8s-snap" ? var.k8s_worker_count : 0
+  name     = "${local.lxd_prefix}-k8s-worker-${count.index + 1}"
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
@@ -173,7 +216,16 @@ resource "local_file" "ansible_inventory" {
           hosts = { for name in lxd_instance.microcloud_nodes[*].name : name => { ansible_connection = "lxd" } }
         }
         k8s_snap = {
-          hosts = { for name in lxd_instance.k8s_nodes[*].name : name => { ansible_connection = "lxd" } }
+          hosts = merge(
+            { for name in lxd_instance.k8s_control_plane_nodes[*].name : name => { ansible_connection = "lxd", k8s_role = "control-plane" } },
+            { for name in lxd_instance.k8s_worker_nodes[*].name : name => { ansible_connection = "lxd", k8s_role = "worker" } }
+          )
+        }
+        k8s_control_plane = {
+          hosts = { for name in lxd_instance.k8s_control_plane_nodes[*].name : name => { ansible_connection = "lxd" } }
+        }
+        k8s_workers = {
+          hosts = { for name in lxd_instance.k8s_worker_nodes[*].name : name => { ansible_connection = "lxd" } }
         }
       }
     }
