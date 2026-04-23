@@ -280,7 +280,7 @@ else
     done
 fi
 
-read -p "Enter your lab-name/prefix (e.g., ismail): " user_prefix_input
+read -p "Enter your lab-name/prefix (e.g., your name): " user_prefix_input
 user_prefix_input=$(normalize_lab_prefix_input "$user_prefix_input" "$scenario")
 user_prefix=$(echo "$user_prefix_input" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
 
