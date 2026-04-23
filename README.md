@@ -7,18 +7,56 @@ Supported scenarios:
 - Canonical Kubernetes (Snap)
 - MicroCloud
 
-Main entrypoint:
+## Before You Start
+
+Minimum host requirements:
+
+- a Linux host
+- `sudo` access
+- internet access
+
+This project needs these tools on the host:
+
+- LXD
+- OpenTofu
+- Ansible
+
+You have two ways to continue:
+
+### Option 1: Auto-prepare Script
+
+Run:
 
 ```bash
-./orchestrate.sh
+./prep_host.sh
 ```
+
+This script checks the host and prepares missing requirements automatically. It can:
+
+- install LXD
+- run `lxd init --auto` if needed
+- add your user to the `lxd` group if needed
+- install OpenTofu
+- install Ansible
+- install the `community.general` collection
+- create `~/.ssh/id_rsa_lab` if missing
+- run `tofu init`
+
+This is the easiest option for a new user.
+
+### Option 2: Prepare the host yourself
+
+If your host is already ready, you can skip `prep_host.sh` and run the main deployment script directly.
+
 
 ## Quick Start
 
-From the repository root:
+From the repository directory:
 
 ```bash
+
 chmod +x orchestrate.sh
+
 ./orchestrate.sh
 ```
 
@@ -30,22 +68,7 @@ You will then choose one of these options:
 3) Destroy Environments
 ```
 
-## Requirements
-
-Before you start, make sure:
-
-- LXD is installed and working
-- the LXD `default` storage pool exists
-- you can run `lxc` commands on the host
-- the host has internet access
-
-The script can install missing tools automatically when needed:
-
-- OpenTofu
-- Ansible
-- required Ansible collection(s)
-
-It also creates an SSH key automatically if needed:
+The lab SSH key used by the project is:
 
 - `~/.ssh/id_rsa_lab`
 
@@ -54,13 +77,13 @@ It also creates an SSH key automatically if needed:
 You enter a simple lab prefix such as:
 
 ```text
-ismail
+mylab
 ```
 
 The script converts it into a workspace name automatically:
 
-- Kubernetes: `ismail_k8s-snap`
-- MicroCloud: `ismail_microcloud`
+- Kubernetes: `mylab_k8s-snap`
+- MicroCloud: `mylab_microcloud`
 
 If you enter the full workspace name by mistake, the script normalizes it automatically.
 
