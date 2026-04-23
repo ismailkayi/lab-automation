@@ -28,6 +28,8 @@
         - { name: 'microceph', channel: 'squid/stable' }
         - { name: 'microovn', channel: '24.03/stable' }
         - { name: 'lxd', channel: '5.21/stable' }
+      loop_control:
+        label: "{{ item.name }}"
       register: snap_checks
       changed_when: false
       failed_when: false
@@ -35,6 +37,8 @@
     - name: Install missing snaps only
       command: snap install {{ item.item.name }} --channel={{ item.item.channel }}
       loop: "{{ snap_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
       when: item.rc != 0
       changed_when: true
 
