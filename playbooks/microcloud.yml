@@ -65,6 +65,24 @@
       register: ovn_iface_detect
       changed_when: false
 
+    - name: Detect available Ceph disk path (non-root, unmounted)
+      shell: |
+        root_src="$(findmnt -n -o SOURCE /)"
+        root_disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null || true)"
+
+        for disk in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk" {print $1}'); do
+          [ "$disk" = "$root_disk" ] && continue
+
+          if lsblk -nr -o MOUNTPOINT "/dev/$disk" | grep -q '[^[:space:]]'; then
+            continue
+          fi
+
+          echo "/dev/$disk"
+          break
+        done
+      register: ceph_disk_detect
+      changed_when: false
+
     - name: Fail if no IP-free uplink interface found
       fail:
         msg: >
@@ -72,9 +90,20 @@
           the OVN uplink. Ensure each node has a dedicated NIC with no IP assigned.
       when: ovn_iface_detect.stdout | trim == ""
 
+    - name: Fail if no non-root disk is available for Ceph
+      fail:
+        msg: >
+          Could not find a suitable non-root block device for Ceph. Ensure each
+          MicroCloud node has an extra disk attached.
+      when: ceph_disk_detect.stdout | trim == ""
+
     - name: Set OVN uplink interface fact
       set_fact:
         ovn_uplink_iface: "{{ ovn_iface_detect.stdout | trim }}"
+
+    - name: Set Ceph disk path fact
+      set_fact:
+        ceph_disk_path: "{{ ceph_disk_detect.stdout | trim }}"
 
     - name: Write MicroCloud preseed file to /tmp
       copy:
@@ -87,10 +116,10 @@
           systems:
           {% for host in groups['microcloud'] %}
             - name: {{ host }}
-              ovn_uplink_interface: {{ ovn_uplink_iface }}
+              ovn_uplink_interface: {{ hostvars[host].ovn_uplink_iface }}
               storage:
                 ceph:
-                  - path: /dev/sdb
+                  - path: {{ hostvars[host].ceph_disk_path }}
                     wipe: true
           {% endfor %}
           ovn:

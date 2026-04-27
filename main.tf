@@ -64,6 +64,16 @@ variable "k8s_worker_count" {
   }
 }
 
+variable "lxd_network_name" {
+  description = "Primary LXD bridge network name used for VM eth0"
+  type        = string
+}
+
+variable "lxd_storage_pool" {
+  description = "LXD storage pool name used for VM root disks and MicroCloud Ceph disks"
+  type        = string
+}
+
 locals {
   # Original environment ID for local files (e.g., ismail_microcloud)
   env_id = terraform.workspace == "default" ? var.user_prefix : terraform.workspace
@@ -84,7 +94,7 @@ resource "lxd_profile" "lab_base" {
     name = "eth0"
     type = "nic"
     properties = {
-      network = "lxdbr0"
+      network = var.lxd_network_name
     }
   }
 
@@ -92,7 +102,7 @@ resource "lxd_profile" "lab_base" {
     name = "root"
     type = "disk"
     properties = {
-      pool = "default"
+      pool = var.lxd_storage_pool
       path = "/"
       size = "40GiB"
     }
@@ -117,7 +127,7 @@ resource "lxd_network" "ovn_uplink" {
 resource "lxd_volume" "microcloud_ceph_disks" {
   count        = var.scenario == "microcloud" ? 3 : 0
   name         = "${local.lxd_prefix}-ceph-${count.index + 1}"
-  pool         = "default"
+  pool         = var.lxd_storage_pool
   content_type = "block"
   config       = { size = "50GiB" }
 }
@@ -149,7 +159,7 @@ resource "lxd_instance" "microcloud_nodes" {
     type = "disk"
     properties = {
       source = lxd_volume.microcloud_ceph_disks[count.index].name
-      pool   = "default"
+      pool   = var.lxd_storage_pool
     }
   }
 

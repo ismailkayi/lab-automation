@@ -58,6 +58,9 @@ ensure_sudo_session() {
 }
 
 ensure_lxd() {
+    local bridge_count="0"
+    local storage_count="0"
+
     if ! type -P lxd >/dev/null 2>&1 || ! type -P lxc >/dev/null 2>&1; then
         log_info "Installing LXD..."
         sudo snap install lxd
@@ -70,10 +73,13 @@ ensure_lxd() {
     sudo lxd waitready --timeout=30
     add_done "LXD daemon is ready"
 
-    if ! sudo lxc profile show default >/dev/null 2>&1; then
+    bridge_count=$(sudo lxc network list --format csv -c t | grep -c '^bridge$' || true)
+    storage_count=$(sudo lxc storage list --format csv -c n | grep -c '.' || true)
+
+    if [[ "$bridge_count" -eq 0 || "$storage_count" -eq 0 ]]; then
         log_info "Initializing LXD with default settings..."
         sudo lxd init --auto
-        add_done "LXD initialized (default profile created)"
+        add_done "LXD initialized (bridge network and storage pool prepared)"
     else
         add_skipped "LXD already initialized"
     fi

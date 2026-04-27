@@ -15,10 +15,79 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
+LXD_NETWORK_NAME=""
+LXD_STORAGE_POOL=""
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+
+detect_lxd_defaults() {
+    local detected_network=""
+    local detected_pool=""
+    local fallback_bridge=""
+    local ipv4_addr=""
+    local bridge_name=""
+
+    if ! command -v lxc &> /dev/null; then
+        log_warn "LXD CLI (lxc) not found. Run ./prep_host.sh first."
+        exit 1
+    fi
+
+    if ! lxc info >/dev/null 2>&1; then
+        log_warn "LXD is not reachable for the current user. Run ./prep_host.sh first."
+        exit 1
+    fi
+
+    if lxc network show lxdbr0 >/dev/null 2>&1; then
+        detected_network="lxdbr0"
+    else
+        while IFS= read -r bridge_name; do
+            [[ -z "$bridge_name" ]] && continue
+
+            if [[ -z "$fallback_bridge" ]]; then
+                fallback_bridge="$bridge_name"
+            fi
+
+            ipv4_addr=$(lxc network get "$bridge_name" ipv4.address 2>/dev/null || true)
+            if [[ -n "$ipv4_addr" && "$ipv4_addr" != "none" ]]; then
+                detected_network="$bridge_name"
+                break
+            fi
+        done < <(lxc network list --format csv -c n,t | awk -F',' '$2=="bridge" {print $1}')
+
+        if [[ -z "$detected_network" ]]; then
+            detected_network="$fallback_bridge"
+        fi
+    fi
+
+    if [[ -z "$detected_network" ]]; then
+        log_warn "No LXD bridge network found (expected lxdbr0 or another bridge)."
+        log_warn "Run ./prep_host.sh to initialize LXD networking."
+        exit 1
+    fi
+
+    if lxc storage show default >/dev/null 2>&1; then
+        detected_pool="default"
+    else
+        detected_pool=$(lxc storage list --format csv -c n | head -n 1)
+    fi
+
+    if [[ -z "$detected_pool" ]]; then
+        log_warn "No LXD storage pool found (expected default or another pool)."
+        log_warn "Run ./prep_host.sh to initialize LXD storage."
+        exit 1
+    fi
+
+    LXD_NETWORK_NAME="$detected_network"
+    LXD_STORAGE_POOL="$detected_pool"
+
+    export TF_VAR_lxd_network_name="$LXD_NETWORK_NAME"
+    export TF_VAR_lxd_storage_pool="$LXD_STORAGE_POOL"
+
+    log_info "Using LXD network: ${LXD_NETWORK_NAME}"
+    log_info "Using LXD storage pool: ${LXD_STORAGE_POOL}"
+}
 
 workspace_exists() {
     local workspace_name="$1"
@@ -96,6 +165,7 @@ cleanup_microcloud_orphans() {
     local lxd_prefix="${env_name//_/-}"
     local uplink_network="mc-${lxd_prefix:0:8}-up"
     local profile_name="${lxd_prefix}-iac-base"
+    local storage_pool="${LXD_STORAGE_POOL}"
 
     # If provider state is inconsistent, these resources can remain orphaned.
     for i in 1 2 3; do
@@ -103,7 +173,7 @@ cleanup_microcloud_orphans() {
     done
 
     for i in 1 2 3; do
-        lxc storage volume delete default "${lxd_prefix}-ceph-${i}" >/dev/null 2>&1 || true
+        lxc storage volume delete "$storage_pool" "${lxd_prefix}-ceph-${i}" >/dev/null 2>&1 || true
     done
 
     lxc network delete "$uplink_network" >/dev/null 2>&1 || true
@@ -273,6 +343,7 @@ echo -e "${CYAN}    CANONICAL IaC DEPLOYMENT ENGINE (TOFU + ANSIBLE)       ${NC}
 echo -e "${CYAN}==========================================================${NC}"
 
 ensure_tools
+detect_lxd_defaults
 tofu init -v >/dev/null 2>&1
 
 echo ""
