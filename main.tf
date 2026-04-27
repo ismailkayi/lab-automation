@@ -64,6 +64,50 @@ variable "k8s_worker_count" {
   }
 }
 
+variable "k8s_control_plane_cpu" {
+  description = "vCPU count per Kubernetes control-plane node"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.k8s_control_plane_cpu >= 1
+    error_message = "k8s_control_plane_cpu must be 1 or greater."
+  }
+}
+
+variable "k8s_control_plane_memory_gib" {
+  description = "Memory in GiB per Kubernetes control-plane node"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.k8s_control_plane_memory_gib >= 1
+    error_message = "k8s_control_plane_memory_gib must be 1 or greater."
+  }
+}
+
+variable "k8s_worker_cpu" {
+  description = "vCPU count per Kubernetes worker node"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.k8s_worker_cpu >= 1
+    error_message = "k8s_worker_cpu must be 1 or greater."
+  }
+}
+
+variable "k8s_worker_memory_gib" {
+  description = "Memory in GiB per Kubernetes worker node"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.k8s_worker_memory_gib >= 1
+    error_message = "k8s_worker_memory_gib must be 1 or greater."
+  }
+}
+
 variable "lxd_network_name" {
   description = "Primary LXD bridge network name used for VM eth0"
   type        = string
@@ -226,8 +270,8 @@ resource "lxd_instance" "k8s_control_plane_nodes" {
   profiles = [lxd_profile.lab_base.name]
 
   limits = {
-    cpu    = "2"
-    memory = "4GiB"
+    cpu    = tostring(var.k8s_control_plane_cpu)
+    memory = "${var.k8s_control_plane_memory_gib}GiB"
   }
 
   config = {
@@ -247,8 +291,8 @@ resource "lxd_instance" "k8s_worker_nodes" {
   profiles = [lxd_profile.lab_base.name]
 
   limits = {
-    cpu    = "2"
-    memory = "4GiB"
+    cpu    = tostring(var.k8s_worker_cpu)
+    memory = "${var.k8s_worker_memory_gib}GiB"
   }
 
   config = {
