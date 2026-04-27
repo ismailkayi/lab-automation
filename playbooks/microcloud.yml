@@ -106,6 +106,38 @@
       set_fact:
         lookup_subnet: "{{ ansible_facts['default_ipv4']['address'].split('.')[:-1] | join('.') + '.0/24' }}"
 
+    - name: Select non-overlapping OVN subnet base
+      set_fact:
+        ovn_subnet_base: >-
+          {% if lookup_subnet.startswith('10.') %}
+          192.168.250
+          {% elif lookup_subnet.startswith('192.168.') %}
+          10.250.1
+          {% else %}
+          10.250.1
+          {% endif %}
+
+    - name: Read preferred UPLINK network name state in LXD
+      command: lxc network show UPLINK
+      register: uplink_name_check
+      changed_when: false
+      failed_when: false
+
+    - name: Read preferred OVN default network name state in LXD
+      command: lxc network show default
+      register: ovn_default_name_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set MicroCloud network names
+      set_fact:
+        microcloud_uplink_network_name: >-
+          {{ 'UPLINK' if (uplink_name_check.rc != 0 or 'type: physical' in uplink_name_check.stdout) else 'uplink-' ~ (inventory_hostname | regex_replace('-node-[0-9]+$', '') | truncate(8, True, '')) }}
+        microcloud_ovn_network_name: >-
+          {{ 'default' if (ovn_default_name_check.rc != 0 or 'type: ovn' in ovn_default_name_check.stdout) else 'ovn-' ~ (inventory_hostname | regex_replace('-node-[0-9]+$', '') | truncate(8, True, '')) }}
+        ovn_ipv4_gateway: "{{ ovn_subnet_base }}.1/24"
+        ovn_ipv4_range: "{{ ovn_subnet_base }}.100-{{ ovn_subnet_base }}.200"
+
     - name: Write MicroCloud preseed file to /tmp
       copy:
         dest: /tmp/microcloud-preseed.yaml
@@ -124,8 +156,8 @@
                     wipe: true
           {% endfor %}
           ovn:
-            ipv4_gateway: 10.0.1.1/24
-            ipv4_range: 10.0.1.100-10.0.1.200
+            ipv4_gateway: {{ ovn_ipv4_gateway }}
+            ipv4_range: {{ ovn_ipv4_range }}
             dns_servers: 8.8.8.8
           ceph:
             internal_network: {{ lookup_subnet }}
@@ -173,17 +205,17 @@
       when: joiner_preseed_jobs is defined and ((joiner_preseed_jobs.results | default([])) | selectattr('ansible_job_id', 'defined') | list | length) > 0
 
     - name: Read OVN UPLINK network state in LXD
-      command: lxc network show UPLINK
+      command: lxc network show {{ microcloud_uplink_network_name }}
       register: ovn_uplink_show
       changed_when: false
       failed_when: false
 
     - name: Set OVN UPLINK created flag
       set_fact:
-        ovn_uplink_created: "{{ ovn_uplink_show.rc == 0 and ('status: Created' in ovn_uplink_show.stdout) }}"
+        ovn_uplink_created: "{{ ovn_uplink_show.rc == 0 and ('status: Created' in ovn_uplink_show.stdout) and ('type: physical' in ovn_uplink_show.stdout) }}"
 
     - name: Create or complete OVN UPLINK target config on each node
-      command: lxc network create UPLINK --type=physical parent={{ hostvars[item].ovn_uplink_iface }} --target={{ item }}
+      command: lxc network create {{ microcloud_uplink_network_name }} --type=physical parent={{ hostvars[item].ovn_uplink_iface }} --target={{ item }}
       loop: "{{ groups['microcloud'] }}"
       register: uplink_target_create
       changed_when: uplink_target_create.rc == 0
@@ -194,9 +226,9 @@
 
     - name: Finalize OVN UPLINK network cluster-wide if not created
       command: >
-        lxc network create UPLINK --type=physical
-        ipv4.gateway=10.0.1.1/24
-        ipv4.ovn.ranges=10.0.1.100-10.0.1.200
+        lxc network create {{ microcloud_uplink_network_name }} --type=physical
+        ipv4.gateway={{ ovn_ipv4_gateway }}
+        ipv4.ovn.ranges={{ ovn_ipv4_range }}
         dns.nameservers=8.8.8.8
       register: uplink_finalize
       changed_when: uplink_finalize.rc == 0
@@ -206,17 +238,17 @@
       when: not ovn_uplink_created
 
     - name: Read OVN default network state in LXD
-      command: lxc network show default
+      command: lxc network show {{ microcloud_ovn_network_name }}
       register: ovn_default_show
       changed_when: false
       failed_when: false
 
     - name: Set OVN default network created flag
       set_fact:
-        ovn_default_created: "{{ ovn_default_show.rc == 0 and ('status: Created' in ovn_default_show.stdout) }}"
+        ovn_default_created: "{{ ovn_default_show.rc == 0 and ('status: Created' in ovn_default_show.stdout) and ('type: ovn' in ovn_default_show.stdout) }}"
 
     - name: Create OVN default logical network if not created
-      command: lxc network create default --type=ovn network=UPLINK ipv6.address=none
+      command: lxc network create {{ microcloud_ovn_network_name }} --type=ovn network={{ microcloud_uplink_network_name }} ipv6.address=none
       register: ovn_default_create
       changed_when: ovn_default_create.rc == 0
       failed_when:
