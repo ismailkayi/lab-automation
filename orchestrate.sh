@@ -250,10 +250,28 @@ get_node_primary_ip() {
     ip="$(echo "$ip" | tr -d '[:space:]')"
 
     if [[ -z "$ip" ]]; then
-        ip=$(lxc list "$node" --format csv -c 4 | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1)
+        ip=$(lxc list "$node" --format json 2>/dev/null | python3 -c 'import json, sys; data=json.load(sys.stdin); nets=(data[0].get("state", {}) or {}).get("network", {}); 
+for details in nets.values():
+    for addr in details.get("addresses", []):
+        if addr.get("family") == "inet":
+            print(addr.get("address", ""))
+            raise SystemExit(0)
+' 2>/dev/null || true)
     fi
 
     echo "$ip"
+}
+
+list_lxd_instances_by_prefix() {
+    local prefix="$1"
+
+    lxc list --format json 2>/dev/null | python3 -c 'import json, sys
+prefix = sys.argv[1]
+for inst in json.load(sys.stdin):
+    name = inst.get("name", "")
+    if name.startswith(prefix):
+        print(name)
+' "$prefix"
 }
 
 print_microcloud_summary() {
@@ -262,7 +280,7 @@ print_microcloud_summary() {
     local first_node=""
     local health="UNKNOWN"
 
-    mapfile -t nodes < <(lxc list --format csv -c n | grep "^${lxd_prefix}-node-" || true)
+    mapfile -t nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-node-" || true)
 
     if [[ ${#nodes[@]} -eq 0 ]]; then
         log_warn "Could not find MicroCloud nodes for summary output."
@@ -297,8 +315,8 @@ print_k8s_summary() {
     local lxd_prefix="${ws_name//_/-}"
     local first_cp=""
 
-    mapfile -t cp_nodes < <(lxc list --format csv -c n | grep "^${lxd_prefix}-k8s-cp-" || true)
-    mapfile -t worker_nodes < <(lxc list --format csv -c n | grep "^${lxd_prefix}-k8s-worker-" || true)
+    mapfile -t cp_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-k8s-cp-" || true)
+    mapfile -t worker_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-k8s-worker-" || true)
 
     if [[ ${#cp_nodes[@]} -eq 0 ]]; then
         log_warn "Could not find K8s control-plane nodes for summary output."
