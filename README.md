@@ -143,6 +143,44 @@ MicroCloud currently uses a fixed topology:
 - MicroCeph enabled
 - MicroOVN enabled
 
+### MicroCloud Sizing Profiles
+
+During MicroCloud deployment, the script scans host resources and suggests per-node sizing for the 3-node cluster.
+
+Detected inputs:
+
+- total CPU cores
+- total RAM (MiB)
+- available storage in the selected LXD storage pool
+
+Host reserve policy (to keep the host responsive):
+
+- CPU reserve: max(`20%`, `2` cores)
+- RAM reserve: max(`20%`, `4096` MiB)
+- Disk safety buffer: `20` GiB
+
+From the remaining usable resources, the script computes a `balanced` recommendation (per node), then derives profiles:
+
+- `recommended`: same as `balanced`
+- `conservative`: smaller than balanced
+- `balanced`: host-based recommended profile
+- `performance`: larger than balanced
+- `custom`: you enter per-node values manually
+
+If you choose `custom`, you can set:
+
+- vCPU per node
+- memory (MiB) per node
+- root disk (GiB) per node
+- ceph disk (GiB) per node
+
+Minimum validation bounds:
+
+- cpu >= `1`
+- memory >= `1024` MiB
+- root disk >= `20` GiB
+- ceph disk >= `10` GiB
+
 At the end of a successful deployment, the script prints:
 
 - cluster health

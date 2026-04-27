@@ -17,10 +17,208 @@ NC='\033[0m'
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
 LXD_NETWORK_NAME=""
 LXD_STORAGE_POOL=""
+MICROCLOUD_NODE_CPU="2"
+MICROCLOUD_NODE_MEMORY_MB="4096"
+MICROCLOUD_ROOT_DISK_GIB="40"
+MICROCLOUD_CEPH_DISK_GIB="50"
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+
+to_gib_int() {
+    local raw="$1"
+    local number=""
+    local unit=""
+
+    number=$(echo "$raw" | grep -Eo '[0-9]+([.][0-9]+)?' | head -n 1)
+    unit=$(echo "$raw" | grep -Eo '[A-Za-z]+' | tail -n 1)
+
+    if [[ -z "$number" || -z "$unit" ]]; then
+        echo ""
+        return
+    fi
+
+    awk -v n="$number" -v u="$unit" 'BEGIN {
+        if (u == "TiB") print int(n * 1024)
+        else if (u == "GiB") print int(n)
+        else if (u == "MiB") print int(n / 1024)
+        else print ""
+    }'
+}
+
+get_storage_available_gib() {
+    local storage_info=""
+    local available_line=""
+    local available_gib=""
+    local df_gib=""
+
+    storage_info=$(lxc storage info "$LXD_STORAGE_POOL" 2>/dev/null || true)
+    available_line=$(echo "$storage_info" | awk -F': ' '/Space available:/ {print $2; exit}')
+    available_gib=$(to_gib_int "$available_line")
+
+    if [[ -n "$available_gib" ]]; then
+        echo "$available_gib"
+        return
+    fi
+
+    df_gib=$(df -BG . 2>/dev/null | awk 'NR==2 {gsub(/G/, "", $4); print $4}')
+    if [[ -n "$df_gib" && "$df_gib" =~ ^[0-9]+$ ]]; then
+        echo "$df_gib"
+    else
+        echo "200"
+    fi
+}
+
+configure_microcloud_sizing() {
+    local cpu_total="0"
+    local ram_total_mb="0"
+    local storage_available_gib="0"
+    local reserve_cpu="0"
+    local reserve_ram_mb="0"
+    local usable_cpu="0"
+    local usable_ram_mb="0"
+    local usable_disk_gib="0"
+    local recommended_cpu="2"
+    local recommended_memory_mb="4096"
+    local recommended_root_gib="40"
+    local recommended_ceph_gib="50"
+    local conservative_cpu="1"
+    local conservative_memory_mb="3072"
+    local conservative_root_gib="30"
+    local conservative_ceph_gib="20"
+    local balanced_cpu="2"
+    local balanced_memory_mb="4096"
+    local balanced_root_gib="40"
+    local balanced_ceph_gib="50"
+    local performance_cpu="4"
+    local performance_memory_mb="8192"
+    local performance_root_gib="50"
+    local performance_ceph_gib="80"
+    local sizing_mode=""
+
+    cpu_total=$(nproc 2>/dev/null || echo 4)
+    ram_total_mb=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+    storage_available_gib=$(get_storage_available_gib)
+
+    reserve_cpu=$(( cpu_total / 5 ))
+    if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
+    usable_cpu=$(( cpu_total - reserve_cpu ))
+    if (( usable_cpu < 3 )); then usable_cpu=3; fi
+
+    reserve_ram_mb=$(( ram_total_mb / 5 ))
+    if (( reserve_ram_mb < 4096 )); then reserve_ram_mb=4096; fi
+    usable_ram_mb=$(( ram_total_mb - reserve_ram_mb ))
+    if (( usable_ram_mb < 12288 )); then usable_ram_mb=12288; fi
+
+    usable_disk_gib=$(( storage_available_gib - 20 ))
+    if (( usable_disk_gib < 120 )); then usable_disk_gib=120; fi
+
+    recommended_cpu=$(( usable_cpu / 3 ))
+    if (( recommended_cpu < 2 )); then recommended_cpu=2; fi
+    if (( recommended_cpu > 8 )); then recommended_cpu=8; fi
+
+    recommended_memory_mb=$(( usable_ram_mb / 3 ))
+    recommended_memory_mb=$(( (recommended_memory_mb / 512) * 512 ))
+    if (( recommended_memory_mb < 4096 )); then recommended_memory_mb=4096; fi
+    if (( recommended_memory_mb > 16384 )); then recommended_memory_mb=16384; fi
+
+    recommended_root_gib=40
+    recommended_ceph_gib=$(( (usable_disk_gib / 3) - recommended_root_gib ))
+    if (( recommended_ceph_gib < 20 )); then recommended_ceph_gib=20; fi
+    if (( recommended_ceph_gib > 200 )); then recommended_ceph_gib=200; fi
+
+    balanced_cpu="$recommended_cpu"
+    balanced_memory_mb="$recommended_memory_mb"
+    balanced_root_gib="$recommended_root_gib"
+    balanced_ceph_gib="$recommended_ceph_gib"
+
+    conservative_cpu=$(( balanced_cpu - 1 ))
+    if (( conservative_cpu < 1 )); then conservative_cpu=1; fi
+    conservative_memory_mb=$(( (balanced_memory_mb * 3) / 4 ))
+    conservative_memory_mb=$(( (conservative_memory_mb / 512) * 512 ))
+    if (( conservative_memory_mb < 2048 )); then conservative_memory_mb=2048; fi
+    conservative_root_gib=$(( balanced_root_gib - 10 ))
+    if (( conservative_root_gib < 20 )); then conservative_root_gib=20; fi
+    conservative_ceph_gib=$(( (balanced_ceph_gib * 2) / 3 ))
+    if (( conservative_ceph_gib < 20 )); then conservative_ceph_gib=20; fi
+
+    performance_cpu=$(( balanced_cpu + 1 ))
+    if (( performance_cpu > 8 )); then performance_cpu=8; fi
+    performance_memory_mb=$(( (balanced_memory_mb * 5) / 4 ))
+    performance_memory_mb=$(( (performance_memory_mb / 512) * 512 ))
+    if (( performance_memory_mb < 4096 )); then performance_memory_mb=4096; fi
+    if (( performance_memory_mb > 24576 )); then performance_memory_mb=24576; fi
+    performance_root_gib=$(( balanced_root_gib + 10 ))
+    if (( performance_root_gib > 80 )); then performance_root_gib=80; fi
+    performance_ceph_gib=$(( (balanced_ceph_gib * 4) / 3 ))
+    if (( performance_ceph_gib > 300 )); then performance_ceph_gib=300; fi
+
+    log_info "Detected host resources for MicroCloud sizing:"
+    log_info "- CPU cores: ${cpu_total}"
+    log_info "- RAM: ${ram_total_mb} MiB"
+    log_info "- Storage available (pool ${LXD_STORAGE_POOL}): ${storage_available_gib} GiB"
+
+    log_info "Recommended profile is 'balanced' (applies recommended values):"
+    log_info "- balanced: cpu=${balanced_cpu}, memory=${balanced_memory_mb}MiB, root=${balanced_root_gib}GiB, ceph=${balanced_ceph_gib}GiB"
+    log_info "- conservative: cpu=${conservative_cpu}, memory=${conservative_memory_mb}MiB, root=${conservative_root_gib}GiB, ceph=${conservative_ceph_gib}GiB"
+    log_info "- performance: cpu=${performance_cpu}, memory=${performance_memory_mb}MiB, root=${performance_root_gib}GiB, ceph=${performance_ceph_gib}GiB"
+
+    read -p "MicroCloud sizing profile [recommended/conservative/balanced/performance/custom, default: recommended]: " sizing_mode
+    sizing_mode="${sizing_mode:-recommended}"
+
+    case "$sizing_mode" in
+        recommended|balanced)
+            MICROCLOUD_NODE_CPU="$balanced_cpu"
+            MICROCLOUD_NODE_MEMORY_MB="$balanced_memory_mb"
+            MICROCLOUD_ROOT_DISK_GIB="$balanced_root_gib"
+            MICROCLOUD_CEPH_DISK_GIB="$balanced_ceph_gib"
+            ;;
+        conservative)
+            MICROCLOUD_NODE_CPU="$conservative_cpu"
+            MICROCLOUD_NODE_MEMORY_MB="$conservative_memory_mb"
+            MICROCLOUD_ROOT_DISK_GIB="$conservative_root_gib"
+            MICROCLOUD_CEPH_DISK_GIB="$conservative_ceph_gib"
+            ;;
+        performance)
+            MICROCLOUD_NODE_CPU="$performance_cpu"
+            MICROCLOUD_NODE_MEMORY_MB="$performance_memory_mb"
+            MICROCLOUD_ROOT_DISK_GIB="$performance_root_gib"
+            MICROCLOUD_CEPH_DISK_GIB="$performance_ceph_gib"
+            ;;
+        custom)
+            read -p "Per-node vCPU [default: ${balanced_cpu}]: " MICROCLOUD_NODE_CPU_INPUT
+            MICROCLOUD_NODE_CPU="${MICROCLOUD_NODE_CPU_INPUT:-$balanced_cpu}"
+
+            read -p "Per-node memory in MiB [default: ${balanced_memory_mb}]: " MICROCLOUD_NODE_MEMORY_MB_INPUT
+            MICROCLOUD_NODE_MEMORY_MB="${MICROCLOUD_NODE_MEMORY_MB_INPUT:-$balanced_memory_mb}"
+
+            read -p "Per-node root disk in GiB [default: ${balanced_root_gib}]: " MICROCLOUD_ROOT_DISK_GIB_INPUT
+            MICROCLOUD_ROOT_DISK_GIB="${MICROCLOUD_ROOT_DISK_GIB_INPUT:-$balanced_root_gib}"
+
+            read -p "Per-node Ceph disk in GiB [default: ${balanced_ceph_gib}]: " MICROCLOUD_CEPH_DISK_GIB_INPUT
+            MICROCLOUD_CEPH_DISK_GIB="${MICROCLOUD_CEPH_DISK_GIB_INPUT:-$balanced_ceph_gib}"
+            ;;
+        *)
+            echo "Invalid sizing profile. Allowed values: recommended, conservative, balanced, performance, custom."
+            exit 1
+            ;;
+    esac
+
+    for val in "$MICROCLOUD_NODE_CPU" "$MICROCLOUD_NODE_MEMORY_MB" "$MICROCLOUD_ROOT_DISK_GIB" "$MICROCLOUD_CEPH_DISK_GIB"; do
+        if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+            echo "Invalid MicroCloud sizing input. All values must be positive integers."
+            exit 1
+        fi
+    done
+
+    if (( MICROCLOUD_NODE_CPU < 1 || MICROCLOUD_NODE_MEMORY_MB < 1024 || MICROCLOUD_ROOT_DISK_GIB < 20 || MICROCLOUD_CEPH_DISK_GIB < 10 )); then
+        echo "Invalid MicroCloud sizing bounds. Minimums: cpu>=1, memory>=1024MiB, root>=20GiB, ceph>=10GiB."
+        exit 1
+    fi
+
+    log_info "Selected MicroCloud sizing (per node): cpu=${MICROCLOUD_NODE_CPU}, memory=${MICROCLOUD_NODE_MEMORY_MB}MiB, root=${MICROCLOUD_ROOT_DISK_GIB}GiB, ceph=${MICROCLOUD_CEPH_DISK_GIB}GiB"
+}
 
 detect_lxd_defaults() {
     local detected_network=""
@@ -550,6 +748,10 @@ if [[ "$scenario" == "k8s-snap" ]]; then
     fi
 fi
 
+if [[ "$scenario" == "microcloud" ]]; then
+    configure_microcloud_sizing
+fi
+
 log_info "Setting up OpenTofu workspace: ${workspace_name}..."
 tofu workspace select "$workspace_name" 2>/dev/null || tofu workspace new "$workspace_name"
 
@@ -574,6 +776,10 @@ elif [[ "$scenario" == "microcloud" ]]; then
     # Work around intermittent terraform-lxd provider state race during
     # concurrent volume creation by applying MicroCloud resources serially.
     tofu_apply_args+=(
+        -var="microcloud_node_cpu=${MICROCLOUD_NODE_CPU}"
+        -var="microcloud_node_memory_mb=${MICROCLOUD_NODE_MEMORY_MB}"
+        -var="microcloud_root_disk_size_gib=${MICROCLOUD_ROOT_DISK_GIB}"
+        -var="microcloud_ceph_disk_size_gib=${MICROCLOUD_CEPH_DISK_GIB}"
         -parallelism=1
     )
 fi
