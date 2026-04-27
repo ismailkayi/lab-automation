@@ -58,8 +58,11 @@ ensure_sudo_session() {
 }
 
 ensure_lxd() {
-    local bridge_count="0"
+    local routable_bridge_count="0"
     local storage_count="0"
+    local net_name=""
+    local net_type=""
+    local net_ipv4=""
 
     if ! type -P lxd >/dev/null 2>&1 || ! type -P lxc >/dev/null 2>&1; then
         log_info "Installing LXD..."
@@ -73,15 +76,38 @@ ensure_lxd() {
     sudo lxd waitready --timeout=30
     add_done "LXD daemon is ready"
 
-    bridge_count=$(sudo lxc network list --format csv -c t | grep -c '^bridge$' || true)
-    storage_count=$(sudo lxc storage list --format csv -c n | grep -c '.' || true)
+    while IFS= read -r net_name; do
+        [[ -z "$net_name" ]] && continue
 
-    if [[ "$bridge_count" -eq 0 || "$storage_count" -eq 0 ]]; then
+        net_type=$(sudo lxc network show "$net_name" 2>/dev/null | awk -F': ' '$1=="type" {print $2; exit}')
+        [[ "$net_type" != "bridge" ]] && continue
+
+        net_ipv4=$(sudo lxc network get "$net_name" ipv4.address 2>/dev/null || true)
+        if [[ -n "$net_ipv4" && "$net_ipv4" != "none" ]]; then
+            routable_bridge_count=$((routable_bridge_count + 1))
+        fi
+    done < <(sudo lxc network list --format csv | awk -F',' 'NF>0 {print $1}')
+
+    storage_count=$(sudo lxc storage list --format csv | awk -F',' 'NF>0 {count++} END {print count+0}')
+
+    if [[ "$storage_count" -eq 0 ]]; then
         log_info "Initializing LXD with default settings..."
         sudo lxd init --auto
         add_done "LXD initialized (bridge network and storage pool prepared)"
     else
-        add_skipped "LXD already initialized"
+        add_skipped "LXD storage already initialized"
+    fi
+
+    if [[ "$routable_bridge_count" -eq 0 ]]; then
+        if ! sudo lxc network show labbr0 >/dev/null 2>&1; then
+            log_info "Creating fallback LXD bridge network: labbr0"
+            sudo lxc network create labbr0 ipv4.address=auto ipv6.address=none
+            add_done "Fallback LXD bridge labbr0 created"
+        else
+            add_skipped "Fallback LXD bridge labbr0 already exists"
+        fi
+    else
+        add_skipped "Usable LXD bridge network already exists"
     fi
 
     if ! groups "$USER" | grep -qw lxd; then

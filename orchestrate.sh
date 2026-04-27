@@ -25,9 +25,10 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 detect_lxd_defaults() {
     local detected_network=""
     local detected_pool=""
-    local fallback_bridge=""
+    local candidate_name=""
+    local candidate_type=""
     local ipv4_addr=""
-    local bridge_name=""
+    local bridge_inventory=""
 
     if ! command -v lxc &> /dev/null; then
         log_warn "LXD CLI (lxc) not found. Run ./prep_host.sh first."
@@ -39,38 +40,54 @@ detect_lxd_defaults() {
         exit 1
     fi
 
-    if lxc network show lxdbr0 >/dev/null 2>&1; then
-        detected_network="lxdbr0"
-    else
-        while IFS= read -r bridge_name; do
-            [[ -z "$bridge_name" ]] && continue
+    while IFS= read -r candidate_name; do
+        [[ -z "$candidate_name" ]] && continue
 
-            if [[ -z "$fallback_bridge" ]]; then
-                fallback_bridge="$bridge_name"
-            fi
+        candidate_type=$(lxc network show "$candidate_name" 2>/dev/null | awk -F': ' '$1=="type" {print $2; exit}')
+        [[ "$candidate_type" != "bridge" ]] && continue
 
-            ipv4_addr=$(lxc network get "$bridge_name" ipv4.address 2>/dev/null || true)
-            if [[ -n "$ipv4_addr" && "$ipv4_addr" != "none" ]]; then
-                detected_network="$bridge_name"
-                break
-            fi
-        done < <(lxc network list --format csv -c n,t | awk -F',' '$2=="bridge" {print $1}')
+        ipv4_addr=$(lxc network get "$candidate_name" ipv4.address 2>/dev/null || true)
+        bridge_inventory+="\n- ${candidate_name} (ipv4=${ipv4_addr:-unknown})"
 
-        if [[ -z "$detected_network" ]]; then
-            detected_network="$fallback_bridge"
+        if [[ "$candidate_name" == "lxdbr0" && -n "$ipv4_addr" && "$ipv4_addr" != "none" ]]; then
+            detected_network="$candidate_name"
+            break
         fi
-    fi
+
+        if [[ -z "$detected_network" && -n "$ipv4_addr" && "$ipv4_addr" != "none" ]]; then
+            detected_network="$candidate_name"
+        fi
+    done < <(lxc network list --format csv | awk -F',' 'NF>0 {print $1}')
 
     if [[ -z "$detected_network" ]]; then
-        log_warn "No LXD bridge network found (expected lxdbr0 or another bridge)."
-        log_warn "Run ./prep_host.sh to initialize LXD networking."
-        exit 1
+        log_warn "No usable LXD bridge network found (requires IPv4 address not 'none')."
+        if [[ -n "$bridge_inventory" ]]; then
+            log_warn "Detected bridge networks:${bridge_inventory}"
+        fi
+
+        log_info "Attempting to create fallback LXD bridge network: labbr0"
+        if ! lxc network show labbr0 >/dev/null 2>&1; then
+            if sudo lxc network create labbr0 ipv4.address=auto ipv6.address=none >/dev/null 2>&1; then
+                log_info "Created fallback bridge: labbr0"
+            else
+                log_warn "Could not create fallback bridge automatically."
+            fi
+        fi
+
+        ipv4_addr=$(lxc network get labbr0 ipv4.address 2>/dev/null || true)
+        if [[ -n "$ipv4_addr" && "$ipv4_addr" != "none" ]]; then
+            detected_network="labbr0"
+            log_info "Using fallback LXD network: ${detected_network}"
+        else
+            log_warn "Run ./prep_host.sh to create/prepare a usable LXD bridge network."
+            exit 1
+        fi
     fi
 
     if lxc storage show default >/dev/null 2>&1; then
         detected_pool="default"
     else
-        detected_pool=$(lxc storage list --format csv -c n | head -n 1)
+        detected_pool=$(lxc storage list --format csv | awk -F',' 'NR==1 {print $1}')
     fi
 
     if [[ -z "$detected_pool" ]]; then
