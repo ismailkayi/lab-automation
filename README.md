@@ -7,6 +7,18 @@ Supported scenarios:
 - Canonical Kubernetes (Snap)
 - MicroCloud
 
+## Download
+
+If you are not familiar with `git`, you can download this repository with `wget`:
+
+```bash
+wget https://codeload.github.com/ismailkayi/lab-automation/zip/refs/heads/main -O lab-automation.zip
+unzip lab-automation.zip
+cd lab-automation-main
+```
+
+After downloading, continue with the steps below.
+
 ## Before You Start
 
 Minimum host requirements:
