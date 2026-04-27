@@ -197,6 +197,51 @@ cleanup_microcloud_orphans() {
     lxc profile delete "$profile_name" >/dev/null 2>&1 || true
 }
 
+reconcile_microcloud_orphans_with_state() {
+    local env_name="$1"
+    local lxd_prefix="${env_name//_/-}"
+    local uplink_network="mc-${lxd_prefix:0:8}-up"
+    local profile_name="${lxd_prefix}-iac-base"
+    local storage_pool="${LXD_STORAGE_POOL}"
+    local state_list=""
+
+    state_list=$(tofu state list 2>/dev/null || true)
+
+    if ! grep -q '^lxd_network\.ovn_uplink\[0\]$' <<< "$state_list"; then
+        if lxc network show "$uplink_network" >/dev/null 2>&1; then
+            log_warn "Removing orphan network not tracked in state: ${uplink_network}"
+            lxc network delete "$uplink_network" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if ! grep -q '^lxd_profile\.lab_base$' <<< "$state_list"; then
+        if lxc profile show "$profile_name" >/dev/null 2>&1; then
+            log_warn "Removing orphan profile not tracked in state: ${profile_name}"
+            lxc profile delete "$profile_name" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    for i in 0 1 2; do
+        local idx=$((i + 1))
+        local vol_name="${lxd_prefix}-ceph-${idx}"
+        local node_name="${lxd_prefix}-node-${idx}"
+
+        if ! grep -q "^lxd_volume\\.microcloud_ceph_disks\\[${i}\\]$" <<< "$state_list"; then
+            if lxc storage volume show "$storage_pool" "$vol_name" >/dev/null 2>&1; then
+                log_warn "Removing orphan volume not tracked in state: ${storage_pool}/${vol_name}"
+                lxc storage volume delete "$storage_pool" "$vol_name" >/dev/null 2>&1 || true
+            fi
+        fi
+
+        if ! grep -q "^lxd_instance\\.microcloud_nodes\\[${i}\\]$" <<< "$state_list"; then
+            if lxc info "$node_name" >/dev/null 2>&1; then
+                log_warn "Removing orphan instance not tracked in state: ${node_name}"
+                lxc delete -f "$node_name" >/dev/null 2>&1 || true
+            fi
+        fi
+    done
+}
+
 get_node_primary_ip() {
     local node="$1"
     local ip=""
@@ -499,6 +544,10 @@ fi
 
 log_info "Setting up OpenTofu workspace: ${workspace_name}..."
 tofu workspace select "$workspace_name" 2>/dev/null || tofu workspace new "$workspace_name"
+
+if [[ "$scenario" == "microcloud" ]]; then
+    reconcile_microcloud_orphans_with_state "$workspace_name"
+fi
 
 log_info "Provisioning infrastructure with OpenTofu..."
 tofu_apply_args=(
