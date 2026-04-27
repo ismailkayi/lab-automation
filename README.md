@@ -115,6 +115,15 @@ Number of control-plane nodes [default: 3, allowed: 1 or 3]:
 Number of worker-only nodes [default: 1, enter 0 for none]:
 ```
 
+### Kubernetes Sizing
+
+During Kubernetes deployment, VM sizing is calculated dynamically from host resources and selected cluster topology (`control-plane` and `worker` counts).
+
+- Profiles: `balanced` (default), `conservative`, `performance`, `custom`
+- Control-plane and worker nodes are sized separately
+- CPU and memory values are rounded to practical, commonly used tiers
+- `custom` lets you enter per-node vCPU and memory (GB)
+
 At the end of a successful deployment, the script prints:
 
 - cluster nodes
@@ -142,6 +151,17 @@ MicroCloud currently uses a fixed topology:
 - `3` nodes
 - MicroCeph enabled
 - MicroOVN enabled
+
+### MicroCloud Sizing Profiles
+
+During MicroCloud deployment, the script scans host resources and suggests per-node sizing for the fixed 3-node cluster.
+
+- `balanced`: default profile
+- `conservative`: smaller than balanced
+- `performance`: larger than balanced
+- `custom`: you enter per-node values manually
+
+For `custom`, values are entered as per-node `vCPU`, `memory (GB)`, `root disk (GB)`, and `ceph disk (GB)`.
 
 At the end of a successful deployment, the script prints:
 

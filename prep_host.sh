@@ -17,33 +17,47 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
+print_divider() {
+    printf '%s\n' "----------------------------------------------------------"
+}
+
+print_section() {
+    local title="$1"
+    echo ""
+    print_divider
+    echo "$title"
+    print_divider
+}
+
 add_done() { DONE_ITEMS+=("$1"); }
 add_skipped() { SKIPPED_ITEMS+=("$1"); }
 add_warn() { WARN_ITEMS+=("$1"); }
 
 print_summary() {
-    echo ""
-    log_info "Host preparation summary"
+    print_section "Host Preparation Summary"
 
     if [[ ${#DONE_ITEMS[@]} -gt 0 ]]; then
-        echo "[DONE]"
+        echo "DONE:"
         for item in "${DONE_ITEMS[@]}"; do
             echo "  - ${item}"
         done
+        echo ""
     fi
 
     if [[ ${#SKIPPED_ITEMS[@]} -gt 0 ]]; then
-        echo "[SKIPPED]"
+        echo "SKIPPED:"
         for item in "${SKIPPED_ITEMS[@]}"; do
             echo "  - ${item}"
         done
+        echo ""
     fi
 
     if [[ ${#WARN_ITEMS[@]} -gt 0 ]]; then
-        echo "[NOTES]"
+        echo "NOTES:"
         for item in "${WARN_ITEMS[@]}"; do
             echo "  - ${item}"
         done
+        echo ""
     fi
 }
 

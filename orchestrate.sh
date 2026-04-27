@@ -17,10 +17,623 @@ NC='\033[0m'
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
 LXD_NETWORK_NAME=""
 LXD_STORAGE_POOL=""
+MICROCLOUD_NODE_CPU="2"
+MICROCLOUD_NODE_MEMORY_MB="4096"
+MICROCLOUD_ROOT_DISK_GIB="40"
+MICROCLOUD_CEPH_DISK_GIB="50"
+K8S_CONTROL_PLANE_CPU="2"
+K8S_CONTROL_PLANE_MEMORY_GIB="4"
+K8S_WORKER_CPU="2"
+K8S_WORKER_MEMORY_GIB="4"
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+
+print_divider() {
+    printf '%s\n' "----------------------------------------------------------"
+}
+
+print_section() {
+    local title="$1"
+    echo ""
+    print_divider
+    echo "$title"
+    print_divider
+}
+
+print_kv() {
+    local key="$1"
+    local value="$2"
+    printf '  %-30s %b\n' "$key" "$value"
+}
+
+round_down_even() {
+    local value="$1"
+    local minimum="${2:-2}"
+
+    if (( value < minimum )); then
+        echo "$minimum"
+        return
+    fi
+
+    if (( value % 2 != 0 )); then
+        value=$(( value - 1 ))
+    fi
+
+    echo "$value"
+}
+
+pick_floor_tier() {
+    local limit="$1"
+    shift
+    local first_tier="$1"
+    local selected="$first_tier"
+    local tier=""
+
+    for tier in "$@"; do
+        if (( tier <= limit )); then
+            selected="$tier"
+        else
+            break
+        fi
+    done
+
+    echo "$selected"
+}
+
+pick_next_tier() {
+    local current="$1"
+    local limit="$2"
+    shift 2
+    local tier=""
+
+    for tier in "$@"; do
+        if (( tier > current && tier <= limit )); then
+            echo "$tier"
+            return
+        fi
+    done
+
+    echo "$current"
+}
+
+pick_previous_tier() {
+    local current="$1"
+    shift
+    local previous="$1"
+    local tier=""
+
+    for tier in "$@"; do
+        if (( tier >= current )); then
+            break
+        fi
+        previous="$tier"
+    done
+
+    echo "$previous"
+}
+
+print_sizing_table_header() {
+    printf '  %-18s %-6s %-8s %-8s %-8s %s\n' "Profile" "vCPU" "RAM" "Root" "Ceph" "Notes"
+    printf '  %-18s %-6s %-8s %-8s %-8s %s\n' "------------------" "------" "--------" "--------" "--------" "----------------"
+}
+
+print_sizing_table_row() {
+    local profile="$1"
+    local cpu="$2"
+    local memory="$3"
+    local root="$4"
+    local ceph="$5"
+    local notes="$6"
+    local color="${7:-}"
+
+    if [[ -n "$color" ]]; then
+        printf '%b  %-18s %-6s %-8s %-8s %-8s %s%b\n' "$color" "$profile" "$cpu" "$memory" "$root" "$ceph" "$notes" "$NC"
+        return
+    fi
+
+    printf '  %-18s %-6s %-8s %-8s %-8s %s\n' "$profile" "$cpu" "$memory" "$root" "$ceph" "$notes"
+}
+
+fit_k8s_profile_to_host() {
+    local cp_cpu="$1"
+    local cp_ram_gb="$2"
+    local worker_cpu="$3"
+    local worker_ram_gb="$4"
+    local cp_count="$5"
+    local worker_count="$6"
+    local usable_cpu="$7"
+    local usable_ram_gb="$8"
+    local total_cpu="0"
+    local total_ram_gb="0"
+
+    while true; do
+        total_cpu=$(( (cp_count * cp_cpu) + (worker_count * worker_cpu) ))
+        total_ram_gb=$(( (cp_count * cp_ram_gb) + (worker_count * worker_ram_gb) ))
+
+        if (( total_cpu <= usable_cpu && total_ram_gb <= usable_ram_gb )); then
+            break
+        fi
+
+        if (( worker_count > 0 && worker_cpu > 2 )); then
+            worker_cpu=$(pick_previous_tier "$worker_cpu" 2 4 6 8 10 12 16)
+            continue
+        fi
+
+        if (( cp_cpu > 2 )); then
+            cp_cpu=$(pick_previous_tier "$cp_cpu" 2 4 6 8 10 12 16)
+            continue
+        fi
+
+        if (( worker_count > 0 && worker_ram_gb > 4 )); then
+            worker_ram_gb=$(pick_previous_tier "$worker_ram_gb" 4 8 12 16 24 32 48 64 96 128)
+            continue
+        fi
+
+        if (( cp_ram_gb > 4 )); then
+            cp_ram_gb=$(pick_previous_tier "$cp_ram_gb" 4 8 12 16 24 32 48 64 96 128)
+            continue
+        fi
+
+        break
+    done
+
+    echo "${cp_cpu} ${cp_ram_gb} ${worker_cpu} ${worker_ram_gb}"
+}
+
+print_k8s_sizing_table_header() {
+    printf '  %-14s %-22s %-22s %-20s %s\n' "Profile" "Control Plane" "Worker" "Cluster Total" "Notes"
+    printf '  %-14s %-22s %-22s %-20s %s\n' "--------------" "----------------------" "----------------------" "--------------------" "----------------"
+}
+
+print_k8s_sizing_table_row() {
+    local profile="$1"
+    local cp_spec="$2"
+    local worker_spec="$3"
+    local cluster_total="$4"
+    local notes="$5"
+    local color="${6:-}"
+
+    if [[ -n "$color" ]]; then
+        printf '%b  %-14s %-22s %-22s %-20s %s%b\n' "$color" "$profile" "$cp_spec" "$worker_spec" "$cluster_total" "$notes" "$NC"
+        return
+    fi
+
+    printf '  %-14s %-22s %-22s %-20s %s\n' "$profile" "$cp_spec" "$worker_spec" "$cluster_total" "$notes"
+}
+
+configure_k8s_sizing() {
+    local cp_count="$1"
+    local worker_count="$2"
+    local node_count="$(( cp_count + worker_count ))"
+    local cpu_total="0"
+    local ram_total_mb="0"
+    local host_ram_gb="0"
+    local reserve_cpu="0"
+    local reserve_ram_mb="0"
+    local usable_cpu="0"
+    local usable_ram_mb="0"
+    local usable_ram_gb="0"
+    local raw_cpu_per_node="0"
+    local raw_ram_per_node_gb="0"
+    local host_cpu_per_node="0"
+    local host_ram_per_node_gb="0"
+    local balancing_mode=""
+    local worker_display=""
+    local balanced_cp_cpu="2"
+    local balanced_cp_ram_gb="4"
+    local balanced_worker_cpu="2"
+    local balanced_worker_ram_gb="4"
+    local conservative_cp_cpu="2"
+    local conservative_cp_ram_gb="4"
+    local conservative_worker_cpu="2"
+    local conservative_worker_ram_gb="4"
+    local performance_cp_cpu="2"
+    local performance_cp_ram_gb="4"
+    local performance_worker_cpu="2"
+    local performance_worker_ram_gb="4"
+    local profile_cp_cpu="2"
+    local profile_cp_ram_gb="4"
+    local profile_worker_cpu="2"
+    local profile_worker_ram_gb="4"
+    local total_cpu_selected="0"
+    local total_ram_selected_gb="0"
+
+    if (( node_count < 1 )); then
+        echo "Invalid topology. At least one Kubernetes node is required."
+        exit 1
+    fi
+
+    cpu_total=$(nproc 2>/dev/null || echo 4)
+    ram_total_mb=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+    host_ram_gb=$(( (ram_total_mb + 1023) / 1024 ))
+
+    reserve_cpu=$(( cpu_total / 5 ))
+    if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
+    usable_cpu=$(( cpu_total - reserve_cpu ))
+    if (( usable_cpu < node_count * 2 )); then usable_cpu=$(( node_count * 2 )); fi
+
+    reserve_ram_mb=$(( ram_total_mb / 5 ))
+    if (( reserve_ram_mb < 4096 )); then reserve_ram_mb=4096; fi
+    usable_ram_mb=$(( ram_total_mb - reserve_ram_mb ))
+    if (( usable_ram_mb < node_count * 4096 )); then usable_ram_mb=$(( node_count * 4096 )); fi
+    usable_ram_gb=$(( usable_ram_mb / 1024 ))
+
+    raw_cpu_per_node=$(( usable_cpu / node_count ))
+    raw_ram_per_node_gb=$(( usable_ram_gb / node_count ))
+    host_cpu_per_node=$(( cpu_total / node_count ))
+    host_ram_per_node_gb=$(( host_ram_gb / node_count ))
+
+    balanced_cp_cpu=$(pick_floor_tier "$(round_down_even $(( (raw_cpu_per_node * 125) / 100 )) 2)" 2 4 6 8 10 12 16)
+    balanced_worker_cpu=$(pick_floor_tier "$(round_down_even $(( (raw_cpu_per_node * 90) / 100 )) 2)" 2 4 6 8 10 12 16)
+
+    balanced_cp_ram_gb=$(pick_floor_tier $(( (raw_ram_per_node_gb * 135) / 100 )) 4 8 12 16 24 32 48 64 96 128)
+    balanced_worker_ram_gb=$(pick_floor_tier $(( (raw_ram_per_node_gb * 85) / 100 )) 4 8 12 16 24 32 48 64 96 128)
+
+    read -r balanced_cp_cpu balanced_cp_ram_gb balanced_worker_cpu balanced_worker_ram_gb < <(
+        fit_k8s_profile_to_host \
+            "$balanced_cp_cpu" "$balanced_cp_ram_gb" "$balanced_worker_cpu" "$balanced_worker_ram_gb" \
+            "$cp_count" "$worker_count" "$usable_cpu" "$usable_ram_gb"
+    )
+
+    conservative_cp_cpu=$(pick_previous_tier "$balanced_cp_cpu" 2 4 6 8 10 12 16)
+    conservative_worker_cpu=$(pick_previous_tier "$balanced_worker_cpu" 2 4 6 8 10 12 16)
+    conservative_cp_ram_gb=$(pick_previous_tier "$balanced_cp_ram_gb" 4 8 12 16 24 32 48 64 96 128)
+    conservative_worker_ram_gb=$(pick_previous_tier "$balanced_worker_ram_gb" 4 8 12 16 24 32 48 64 96 128)
+
+    performance_cp_cpu=$(pick_next_tier "$balanced_cp_cpu" "$(round_down_even "$host_cpu_per_node" "$balanced_cp_cpu")" 2 4 6 8 10 12 16)
+    performance_worker_cpu=$(pick_next_tier "$balanced_worker_cpu" "$(round_down_even "$host_cpu_per_node" "$balanced_worker_cpu")" 2 4 6 8 10 12 16)
+    performance_cp_ram_gb=$(pick_next_tier "$balanced_cp_ram_gb" "$(pick_floor_tier "$host_ram_per_node_gb" 4 8 12 16 24 32 48 64 96 128)" 4 8 12 16 24 32 48 64 96 128)
+    performance_worker_ram_gb=$(pick_next_tier "$balanced_worker_ram_gb" "$(pick_floor_tier "$host_ram_per_node_gb" 4 8 12 16 24 32 48 64 96 128)" 4 8 12 16 24 32 48 64 96 128)
+
+    # Performance must never be weaker than balanced.
+    if ((
+        (cp_count * performance_cp_cpu) + (worker_count * performance_worker_cpu) > usable_cpu ||
+        (cp_count * performance_cp_ram_gb) + (worker_count * performance_worker_ram_gb) > usable_ram_gb
+    )); then
+        performance_cp_cpu="$balanced_cp_cpu"
+        performance_cp_ram_gb="$balanced_cp_ram_gb"
+        performance_worker_cpu="$balanced_worker_cpu"
+        performance_worker_ram_gb="$balanced_worker_ram_gb"
+    fi
+
+    print_section "K8s Sizing Advisor"
+    print_kv "Topology" "${cp_count} control-plane, ${worker_count} worker"
+    print_kv "Host CPU cores" "${cpu_total}"
+    print_kv "Host RAM" "${host_ram_gb} GB"
+    echo ""
+    print_k8s_sizing_table_header
+
+    if (( worker_count > 0 )); then
+        worker_display="${balanced_worker_cpu} vCPU / ${balanced_worker_ram_gb} GB"
+    else
+        worker_display="n/a (0 workers)"
+    fi
+    print_k8s_sizing_table_row "balanced" "${balanced_cp_cpu} vCPU / ${balanced_cp_ram_gb} GB" "$worker_display" "cpu=$((cp_count * balanced_cp_cpu + worker_count * balanced_worker_cpu)), ram=$((cp_count * balanced_cp_ram_gb + worker_count * balanced_worker_ram_gb))GB" "default" "$GREEN"
+
+    if (( worker_count > 0 )); then
+        worker_display="${conservative_worker_cpu} vCPU / ${conservative_worker_ram_gb} GB"
+    else
+        worker_display="n/a (0 workers)"
+    fi
+    print_k8s_sizing_table_row "conservative" "${conservative_cp_cpu} vCPU / ${conservative_cp_ram_gb} GB" "$worker_display" "cpu=$((cp_count * conservative_cp_cpu + worker_count * conservative_worker_cpu)), ram=$((cp_count * conservative_cp_ram_gb + worker_count * conservative_worker_ram_gb))GB" "lower footprint" "$YELLOW"
+
+    if (( worker_count > 0 )); then
+        worker_display="${performance_worker_cpu} vCPU / ${performance_worker_ram_gb} GB"
+    else
+        worker_display="n/a (0 workers)"
+    fi
+    print_k8s_sizing_table_row "performance" "${performance_cp_cpu} vCPU / ${performance_cp_ram_gb} GB" "$worker_display" "cpu=$((cp_count * performance_cp_cpu + worker_count * performance_worker_cpu)), ram=$((cp_count * performance_cp_ram_gb + worker_count * performance_worker_ram_gb))GB" "more headroom" "$BLUE"
+    print_k8s_sizing_table_row "custom" "-" "-" "-" "manual sizing" "$CYAN"
+
+    echo ""
+    read -p "K8s sizing profile [conservative/balanced/performance/custom, default: balanced]: " balancing_mode
+    balancing_mode="${balancing_mode:-balanced}"
+
+    case "$balancing_mode" in
+        balanced)
+            profile_cp_cpu="$balanced_cp_cpu"
+            profile_cp_ram_gb="$balanced_cp_ram_gb"
+            profile_worker_cpu="$balanced_worker_cpu"
+            profile_worker_ram_gb="$balanced_worker_ram_gb"
+            ;;
+        conservative)
+            profile_cp_cpu="$conservative_cp_cpu"
+            profile_cp_ram_gb="$conservative_cp_ram_gb"
+            profile_worker_cpu="$conservative_worker_cpu"
+            profile_worker_ram_gb="$conservative_worker_ram_gb"
+            ;;
+        performance)
+            profile_cp_cpu="$performance_cp_cpu"
+            profile_cp_ram_gb="$performance_cp_ram_gb"
+            profile_worker_cpu="$performance_worker_cpu"
+            profile_worker_ram_gb="$performance_worker_ram_gb"
+            ;;
+        custom)
+            print_section "Custom K8s Sizing"
+            print_kv "Input units" "memory is entered in GB"
+
+            echo ""
+            read -p "Control-plane vCPU per node [default: ${balanced_cp_cpu}]: " profile_cp_cpu_input
+            profile_cp_cpu="${profile_cp_cpu_input:-$balanced_cp_cpu}"
+
+            echo ""
+            read -p "Control-plane memory in GB per node [default: ${balanced_cp_ram_gb}]: " profile_cp_ram_input
+            profile_cp_ram_gb="${profile_cp_ram_input:-$balanced_cp_ram_gb}"
+
+            if (( worker_count > 0 )); then
+                echo ""
+                read -p "Worker vCPU per node [default: ${balanced_worker_cpu}]: " profile_worker_cpu_input
+                profile_worker_cpu="${profile_worker_cpu_input:-$balanced_worker_cpu}"
+
+                echo ""
+                read -p "Worker memory in GB per node [default: ${balanced_worker_ram_gb}]: " profile_worker_ram_input
+                profile_worker_ram_gb="${profile_worker_ram_input:-$balanced_worker_ram_gb}"
+            else
+                profile_worker_cpu="2"
+                profile_worker_ram_gb="4"
+            fi
+            ;;
+        *)
+            echo "Invalid sizing profile. Allowed values: conservative, balanced, performance, custom."
+            exit 1
+            ;;
+    esac
+
+    for val in "$profile_cp_cpu" "$profile_cp_ram_gb" "$profile_worker_cpu" "$profile_worker_ram_gb"; do
+        if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+            echo "Invalid K8s sizing input. All values must be positive integers."
+            exit 1
+        fi
+    done
+
+    if (( profile_cp_cpu < 1 || profile_cp_ram_gb < 1 )); then
+        echo "Invalid control-plane sizing bounds. Minimums: cpu>=1, memory>=1GB."
+        exit 1
+    fi
+
+    if (( worker_count > 0 && (profile_worker_cpu < 1 || profile_worker_ram_gb < 1) )); then
+        echo "Invalid worker sizing bounds. Minimums: cpu>=1, memory>=1GB."
+        exit 1
+    fi
+
+    read -r profile_cp_cpu profile_cp_ram_gb profile_worker_cpu profile_worker_ram_gb < <(
+        fit_k8s_profile_to_host \
+            "$profile_cp_cpu" "$profile_cp_ram_gb" "$profile_worker_cpu" "$profile_worker_ram_gb" \
+            "$cp_count" "$worker_count" "$usable_cpu" "$usable_ram_gb"
+    )
+
+    K8S_CONTROL_PLANE_CPU="$profile_cp_cpu"
+    K8S_CONTROL_PLANE_MEMORY_GIB="$profile_cp_ram_gb"
+    K8S_WORKER_CPU="$profile_worker_cpu"
+    K8S_WORKER_MEMORY_GIB="$profile_worker_ram_gb"
+
+    total_cpu_selected=$(( (cp_count * K8S_CONTROL_PLANE_CPU) + (worker_count * K8S_WORKER_CPU) ))
+    total_ram_selected_gb=$(( (cp_count * K8S_CONTROL_PLANE_MEMORY_GIB) + (worker_count * K8S_WORKER_MEMORY_GIB) ))
+
+    print_section "Selected K8s Sizing"
+    print_k8s_sizing_table_header
+    if (( worker_count > 0 )); then
+        worker_display="${K8S_WORKER_CPU} vCPU / ${K8S_WORKER_MEMORY_GIB} GB"
+    else
+        worker_display="n/a (0 workers)"
+    fi
+    print_k8s_sizing_table_row "$balancing_mode" "${K8S_CONTROL_PLANE_CPU} vCPU / ${K8S_CONTROL_PLANE_MEMORY_GIB} GB" "$worker_display" "cpu=${total_cpu_selected}, ram=${total_ram_selected_gb}GB" "chosen" "$GREEN"
+}
+
+to_gib_int() {
+    local raw="$1"
+    local number=""
+    local unit=""
+
+    number=$(echo "$raw" | grep -Eo '[0-9]+([.][0-9]+)?' | head -n 1)
+    unit=$(echo "$raw" | grep -Eo '[A-Za-z]+' | tail -n 1)
+
+    if [[ -z "$number" || -z "$unit" ]]; then
+        echo ""
+        return
+    fi
+
+    awk -v n="$number" -v u="$unit" 'BEGIN {
+        if (u == "TiB") print int(n * 1024)
+        else if (u == "GiB") print int(n)
+        else if (u == "MiB") print int(n / 1024)
+        else print ""
+    }'
+}
+
+get_storage_available_gib() {
+    local storage_info=""
+    local available_line=""
+    local available_gib=""
+    local df_gib=""
+
+    storage_info=$(lxc storage info "$LXD_STORAGE_POOL" 2>/dev/null || true)
+    available_line=$(echo "$storage_info" | awk -F': ' '/Space available:/ {print $2; exit}')
+    available_gib=$(to_gib_int "$available_line")
+
+    if [[ -n "$available_gib" ]]; then
+        echo "$available_gib"
+        return
+    fi
+
+    df_gib=$(df -BG . 2>/dev/null | awk 'NR==2 {gsub(/G/, "", $4); print $4}')
+    if [[ -n "$df_gib" && "$df_gib" =~ ^[0-9]+$ ]]; then
+        echo "$df_gib"
+    else
+        echo "200"
+    fi
+}
+
+configure_microcloud_sizing() {
+    local cpu_total="0"
+    local ram_total_mb="0"
+    local storage_available_gib="0"
+    local reserve_cpu="0"
+    local reserve_ram_mb="0"
+    local usable_cpu="0"
+    local usable_ram_mb="0"
+    local usable_disk_gib="0"
+    local conservative_cpu="1"
+    local conservative_memory_mb="3072"
+    local conservative_root_gib="30"
+    local conservative_ceph_gib="20"
+    local balanced_cpu="2"
+    local balanced_memory_mb="4096"
+    local balanced_root_gib="40"
+    local balanced_ceph_gib="50"
+    local balanced_memory_gb="4"
+    local conservative_memory_gb="3"
+    local performance_cpu="4"
+    local performance_memory_mb="8192"
+    local performance_root_gib="50"
+    local performance_ceph_gib="80"
+    local performance_memory_gb="8"
+    local sizing_mode=""
+    local host_ram_gb="0"
+    local host_ram_per_node_gb="0"
+    local raw_balanced_cpu="0"
+    local raw_balanced_memory_gb="0"
+    local raw_balanced_ceph_gib="0"
+    local performance_cpu_limit="0"
+    local performance_cpu_cap="0"
+    local performance_memory_cap_gb="0"
+    local performance_ceph_cap_gib="0"
+    local selected_memory_gb="0"
+
+    cpu_total=$(nproc 2>/dev/null || echo 4)
+    ram_total_mb=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+    storage_available_gib=$(get_storage_available_gib)
+    host_ram_gb=$(( (ram_total_mb + 1023) / 1024 ))
+    host_ram_per_node_gb=$(( host_ram_gb / 3 ))
+
+    reserve_cpu=$(( cpu_total / 5 ))
+    if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
+    usable_cpu=$(( cpu_total - reserve_cpu ))
+    if (( usable_cpu < 3 )); then usable_cpu=3; fi
+
+    reserve_ram_mb=$(( ram_total_mb / 5 ))
+    if (( reserve_ram_mb < 4096 )); then reserve_ram_mb=4096; fi
+    usable_ram_mb=$(( ram_total_mb - reserve_ram_mb ))
+    if (( usable_ram_mb < 12288 )); then usable_ram_mb=12288; fi
+
+    usable_disk_gib=$(( storage_available_gib - 20 ))
+    if (( usable_disk_gib < 120 )); then usable_disk_gib=120; fi
+
+    conservative_root_gib=30
+    balanced_root_gib=40
+    performance_root_gib=50
+
+    raw_balanced_cpu=$(( usable_cpu / 3 ))
+    balanced_cpu=$(round_down_even "$raw_balanced_cpu" 2)
+    conservative_cpu=$(round_down_even $(( balanced_cpu - 2 )) 2)
+    performance_cpu_limit=$(round_down_even $(( cpu_total / 3 )) "$balanced_cpu")
+    performance_cpu=$(( balanced_cpu + 2 ))
+    if (( performance_cpu > performance_cpu_limit )); then
+        performance_cpu="$performance_cpu_limit"
+    fi
+
+    raw_balanced_memory_gb=$(( usable_ram_mb / 3072 ))
+    balanced_memory_gb=$(pick_floor_tier "$raw_balanced_memory_gb" 8 12 16 24 32 48 64 96 128)
+    conservative_memory_gb=$(pick_previous_tier "$balanced_memory_gb" 4 8 12 16 24 32 48 64 96 128)
+    performance_memory_cap_gb=$(pick_floor_tier "$host_ram_per_node_gb" 8 12 16 24 32 48 64 96 128)
+    performance_memory_gb=$(pick_next_tier "$balanced_memory_gb" "$performance_memory_cap_gb" 4 8 12 16 24 32 48 64 96 128)
+
+    raw_balanced_ceph_gib=$(( (usable_disk_gib / 3) - balanced_root_gib ))
+    if (( raw_balanced_ceph_gib < 20 )); then raw_balanced_ceph_gib=20; fi
+    balanced_ceph_gib=$(pick_floor_tier "$raw_balanced_ceph_gib" 20 50 100 150 200 250 300 400 500)
+    conservative_ceph_gib=$(pick_previous_tier "$balanced_ceph_gib" 20 50 100 150 200 250 300 400 500)
+    performance_ceph_cap_gib=$(( (storage_available_gib / 3) - performance_root_gib ))
+    if (( performance_ceph_cap_gib < 20 )); then performance_ceph_cap_gib=20; fi
+    performance_cpu_cap=$(pick_floor_tier "$performance_ceph_cap_gib" 20 50 100 150 200 250 300 400 500)
+    performance_ceph_gib=$(pick_next_tier "$balanced_ceph_gib" "$performance_cpu_cap" 20 50 100 150 200 250 300 400 500)
+
+    balanced_memory_mb=$(( balanced_memory_gb * 1024 ))
+    conservative_memory_mb=$(( conservative_memory_gb * 1024 ))
+    performance_memory_mb=$(( performance_memory_gb * 1024 ))
+
+    print_section "MicroCloud Sizing Advisor"
+    print_kv "Host CPU cores" "${cpu_total}"
+    print_kv "Host RAM" "${host_ram_gb} GB"
+    print_kv "Storage (pool ${LXD_STORAGE_POOL})" "${storage_available_gib} GB"
+    echo ""
+    print_sizing_table_header
+    print_sizing_table_row "balanced" "${balanced_cpu}" "${balanced_memory_gb} GB" "${balanced_root_gib} GB" "${balanced_ceph_gib} GB" "default" "$GREEN"
+    print_sizing_table_row "conservative" "${conservative_cpu}" "${conservative_memory_gb} GB" "${conservative_root_gib} GB" "${conservative_ceph_gib} GB" "lower footprint" "$YELLOW"
+    print_sizing_table_row "performance" "${performance_cpu}" "${performance_memory_gb} GB" "${performance_root_gib} GB" "${performance_ceph_gib} GB" "more headroom" "$BLUE"
+    print_sizing_table_row "custom" "-" "-" "-" "-" "manual sizing" "$CYAN"
+
+    echo ""
+    read -p "MicroCloud sizing profile [conservative/balanced/performance/custom, default: balanced]: " sizing_mode
+    sizing_mode="${sizing_mode:-balanced}"
+
+    case "$sizing_mode" in
+        balanced)
+            MICROCLOUD_NODE_CPU="$balanced_cpu"
+            MICROCLOUD_NODE_MEMORY_MB="$balanced_memory_mb"
+            MICROCLOUD_ROOT_DISK_GIB="$balanced_root_gib"
+            MICROCLOUD_CEPH_DISK_GIB="$balanced_ceph_gib"
+            ;;
+        conservative)
+            MICROCLOUD_NODE_CPU="$conservative_cpu"
+            MICROCLOUD_NODE_MEMORY_MB="$conservative_memory_mb"
+            MICROCLOUD_ROOT_DISK_GIB="$conservative_root_gib"
+            MICROCLOUD_CEPH_DISK_GIB="$conservative_ceph_gib"
+            ;;
+        performance)
+            MICROCLOUD_NODE_CPU="$performance_cpu"
+            MICROCLOUD_NODE_MEMORY_MB="$performance_memory_mb"
+            MICROCLOUD_ROOT_DISK_GIB="$performance_root_gib"
+            MICROCLOUD_CEPH_DISK_GIB="$performance_ceph_gib"
+            ;;
+        custom)
+            print_section "Custom MicroCloud Sizing"
+            print_kv "Input units" "memory and disks are entered in GB"
+            echo ""
+            read -p "Per-node vCPU [default: ${balanced_cpu}]: " MICROCLOUD_NODE_CPU_INPUT
+            MICROCLOUD_NODE_CPU="${MICROCLOUD_NODE_CPU_INPUT:-$balanced_cpu}"
+
+            echo ""
+            read -p "Per-node memory in GB [default: ${balanced_memory_gb}]: " MICROCLOUD_NODE_MEMORY_GB_INPUT
+            MICROCLOUD_NODE_MEMORY_GB="${MICROCLOUD_NODE_MEMORY_GB_INPUT:-$balanced_memory_gb}"
+            if ! [[ "$MICROCLOUD_NODE_MEMORY_GB" =~ ^[0-9]+$ ]]; then
+                echo "Invalid MicroCloud memory input. Enter memory as a whole number in GB."
+                exit 1
+            fi
+            MICROCLOUD_NODE_MEMORY_MB=$(( MICROCLOUD_NODE_MEMORY_GB * 1024 ))
+
+            echo ""
+            read -p "Per-node root disk in GB [default: ${balanced_root_gib}]: " MICROCLOUD_ROOT_DISK_GIB_INPUT
+            MICROCLOUD_ROOT_DISK_GIB="${MICROCLOUD_ROOT_DISK_GIB_INPUT:-$balanced_root_gib}"
+
+            echo ""
+            read -p "Per-node Ceph disk in GB [default: ${balanced_ceph_gib}]: " MICROCLOUD_CEPH_DISK_GIB_INPUT
+            MICROCLOUD_CEPH_DISK_GIB="${MICROCLOUD_CEPH_DISK_GIB_INPUT:-$balanced_ceph_gib}"
+            ;;
+        *)
+            echo "Invalid sizing profile. Allowed values: conservative, balanced, performance, custom."
+            exit 1
+            ;;
+    esac
+
+    for val in "$MICROCLOUD_NODE_CPU" "$MICROCLOUD_NODE_MEMORY_MB" "$MICROCLOUD_ROOT_DISK_GIB" "$MICROCLOUD_CEPH_DISK_GIB"; do
+        if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+            echo "Invalid MicroCloud sizing input. All values must be positive integers."
+            exit 1
+        fi
+    done
+
+    if (( MICROCLOUD_NODE_CPU < 1 || MICROCLOUD_NODE_MEMORY_MB < 1024 || MICROCLOUD_ROOT_DISK_GIB < 20 || MICROCLOUD_CEPH_DISK_GIB < 10 )); then
+        echo "Invalid MicroCloud sizing bounds. Minimums: cpu>=1, memory>=1GB, root>=20GB, ceph>=10GB."
+        exit 1
+    fi
+    selected_memory_gb=$(( (MICROCLOUD_NODE_MEMORY_MB + 1023) / 1024 ))
+
+    print_section "Selected MicroCloud Sizing"
+    print_sizing_table_header
+    print_sizing_table_row "${sizing_mode}" "${MICROCLOUD_NODE_CPU}" "${selected_memory_gb} GB" "${MICROCLOUD_ROOT_DISK_GIB} GB" "${MICROCLOUD_CEPH_DISK_GIB} GB" "chosen" "$GREEN"
+}
 
 detect_lxd_defaults() {
     local detected_network=""
@@ -102,8 +715,9 @@ detect_lxd_defaults() {
     export TF_VAR_lxd_network_name="$LXD_NETWORK_NAME"
     export TF_VAR_lxd_storage_pool="$LXD_STORAGE_POOL"
 
-    log_info "Using LXD network: ${LXD_NETWORK_NAME}"
-    log_info "Using LXD storage pool: ${LXD_STORAGE_POOL}"
+    print_section "LXD Environment"
+    print_kv "Selected network" "${LXD_NETWORK_NAME}"
+    print_kv "Selected storage pool" "${LXD_STORAGE_POOL}"
 }
 
 workspace_exists() {
@@ -269,6 +883,9 @@ print_microcloud_summary() {
     local lxd_prefix="${ws_name//_/-}"
     local first_node=""
     local health="UNKNOWN"
+    local health_upper="UNKNOWN"
+    local health_color="$YELLOW"
+    local ip=""
 
     mapfile -t nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-node-" || true)
 
@@ -280,22 +897,29 @@ print_microcloud_summary() {
     first_node="${nodes[0]}"
     health=$(lxc exec "$first_node" -- microcloud status 2>/dev/null | awk '/Status:/ {print $2; exit}')
     health="${health:-UNKNOWN}"
+    health_upper=$(echo "$health" | tr '[:lower:]' '[:upper:]')
 
-    log_info "MicroCloud lab is ready."
-    log_info "Health: ${health}"
-    log_info "Cluster nodes:"
+    if [[ "$health_upper" == "ONLINE" || "$health_upper" == "HEALTHY" ]]; then
+        health_color="$GREEN"
+    elif [[ "$health_upper" == "OFFLINE" || "$health_upper" == "ERROR" || "$health_upper" == "DEGRADED" ]]; then
+        health_color="$RED"
+    fi
+
+    print_section "MicroCloud Deployment Summary"
+    print_kv "Cluster health" "${health_color}${health}${NC}"
+    print_kv "Node count" "${#nodes[@]}"
+    print_kv "UI port" "8443"
+    echo ""
+    printf '  %-28s %-16s %s\n' "Node" "IP" "UI"
+    printf '  %-28s %-16s %s\n' "----------------------------" "----------------" "------------------------------"
 
     for node in "${nodes[@]}"; do
         ip=$(get_node_primary_ip "$node")
         ip="${ip:-N/A}"
-        log_info "- ${node} (${ip})"
-    done
-
-    log_info "UI access links:"
-    for node in "${nodes[@]}"; do
-        ip=$(get_node_primary_ip "$node")
-        if [[ -n "$ip" ]]; then
-            log_info "- https://${ip}:8443"
+        if [[ "$ip" == "N/A" ]]; then
+            printf '  %-28s %-16s %s\n' "$node" "$ip" "-"
+        else
+            printf '  %-28s %-16s %s\n' "$node" "$ip" "https://${ip}:8443"
         fi
     done
 }
@@ -304,6 +928,7 @@ print_k8s_summary() {
     local ws_name="$1"
     local lxd_prefix="${ws_name//_/-}"
     local first_cp=""
+    local api_ip=""
 
     mapfile -t cp_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-k8s-cp-" || true)
     mapfile -t worker_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-k8s-worker-" || true)
@@ -314,25 +939,48 @@ print_k8s_summary() {
     fi
 
     first_cp="${cp_nodes[0]}"
+    api_ip="$(get_node_primary_ip "$first_cp")"
+    api_ip="${api_ip:-N/A}"
 
-    log_info "Canonical Kubernetes lab is ready."
-    log_info "Cluster nodes:"
+    print_section "Kubernetes Deployment Summary"
+    print_kv "Control-plane nodes" "${#cp_nodes[@]}"
+    print_kv "Worker nodes" "${#worker_nodes[@]}"
+    print_kv "Kube API endpoint" "https://${api_ip}:6443"
+    echo ""
+
+    echo "Control-plane:"
 
     for node in "${cp_nodes[@]}"; do
         ip=$(get_node_primary_ip "$node")
         ip="${ip:-N/A}"
-        log_info "- ${node} (${ip}) [control-plane]"
+        printf '  - %s (%s)\n' "$node" "$ip"
     done
 
-    for node in "${worker_nodes[@]}"; do
-        ip=$(get_node_primary_ip "$node")
-        ip="${ip:-N/A}"
-        log_info "- ${node} (${ip}) [worker]"
-    done
+    if [[ ${#worker_nodes[@]} -gt 0 ]]; then
+        echo ""
+        echo "Workers:"
+        for node in "${worker_nodes[@]}"; do
+            ip=$(get_node_primary_ip "$node")
+            ip="${ip:-N/A}"
+            printf '  - %s (%s)\n' "$node" "$ip"
+        done
+    fi
 
-    log_info "Kube API endpoint: https://$(get_node_primary_ip "$first_cp"):6443"
-    log_info "Cluster node status:"
-    lxc exec "$first_cp" -- k8s kubectl get nodes -o wide | sed 's/^/[INFO] /'
+    echo ""
+    echo "Node status:"
+    printf '  %-34s %-8s %-22s %-16s %s\n' "Name" "Status" "Roles" "Internal IP" "Version"
+    printf '  %-34s %-8s %-22s %-16s %s\n' "----------------------------------" "--------" "----------------------" "----------------" "--------"
+    while read -r name status roles age version internal_ip _; do
+        [[ -z "${name:-}" ]] && continue
+        status_color="$RED"
+        if [[ "$status" == "Ready" ]]; then
+            status_color="$GREEN"
+        elif [[ "$status" == "SchedulingDisabled" ]]; then
+            status_color="$YELLOW"
+        fi
+
+        printf '  %-34s %b%-8s%b %-22s %-16s %s\n' "$name" "$status_color" "$status" "$NC" "$roles" "$internal_ip" "$version"
+    done < <(lxc exec "$first_cp" -- k8s kubectl get nodes -o wide --no-headers)
 }
 
 ensure_tools() {
@@ -373,6 +1021,7 @@ destroy_menu() {
     echo "0) Cancel and Exit"
     echo ""
     
+    echo ""
     read -p "Select the environment number to destroy: " env_idx
     
     if [[ "$env_idx" == "0" || -z "$env_idx" || "$env_idx" -gt "${#envs[@]}" ]]; then
@@ -387,6 +1036,7 @@ destroy_menu() {
     local env_scenario="${selected_env#*_}"
 
     log_warn "Selected environment for destruction: ${selected_env}"
+    echo ""
     read -p "Type 'yes' to destroy ${selected_env}: " destroy_confirm
 
     if [[ "$destroy_confirm" != "yes" ]]; then
@@ -420,6 +1070,7 @@ echo ""
 echo "1) Deploy Canonical K8s (Snap)"
 echo "2) Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)"
 echo "3) Destroy Environments"
+echo ""
 read -p "Select action: " action
 
 if [[ "$action" == "3" ]]; then
@@ -445,6 +1096,7 @@ else
     done
 fi
 
+echo ""
 read -p "Enter your lab-name/prefix (e.g., your name): " user_prefix_input
 user_prefix_input=$(normalize_lab_prefix_input "$user_prefix_input" "$scenario")
 user_prefix=$(echo "$user_prefix_input" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
@@ -473,6 +1125,7 @@ if [[ "$scenario" == "k8s-snap" && "$existing_workspace" == true ]]; then
 
     log_warn "Existing K8s lab detected: ${workspace_name}"
     log_info "Current topology: ${current_k8s_cp_count} control-plane node(s), ${current_k8s_worker_count} worker-only node(s)"
+    echo ""
     read -p "Choose action for this existing lab [add/rebuild/cancel, default: add]: " existing_lab_action
     existing_lab_action="${existing_lab_action:-add}"
 
@@ -500,6 +1153,7 @@ fi
 
 if [[ "$scenario" == "k8s-snap" ]]; then
     if [[ "$existing_workspace" == true && "$k8s_update_action" == "add" ]]; then
+        echo ""
         read -p "Target control-plane nodes [default: ${current_k8s_cp_count}, allowed: 1 or 3, must be >= current]: " k8s_control_plane_count_input
         k8s_control_plane_count="${k8s_control_plane_count_input:-$current_k8s_cp_count}"
 
@@ -513,6 +1167,7 @@ if [[ "$scenario" == "k8s-snap" ]]; then
             exit 1
         fi
 
+        echo ""
         read -p "Target worker-only nodes [default: ${current_k8s_worker_count}, enter 0 for none, must be >= current]: " k8s_worker_count_input
         k8s_worker_count="${k8s_worker_count_input:-$current_k8s_worker_count}"
 
@@ -532,6 +1187,7 @@ if [[ "$scenario" == "k8s-snap" ]]; then
             log_info "The existing lab will be expanded in place."
         fi
     else
+        echo ""
         read -p "Number of control-plane nodes [default: 3, allowed: 1 or 3]: " k8s_control_plane_count_input
         k8s_control_plane_count="${k8s_control_plane_count_input:-3}"
 
@@ -540,6 +1196,7 @@ if [[ "$scenario" == "k8s-snap" ]]; then
             exit 1
         fi
 
+        echo ""
         read -p "Number of worker-only nodes [default: 1, enter 0 for none]: " k8s_worker_count_input
         k8s_worker_count="${k8s_worker_count_input:-1}"
 
@@ -548,6 +1205,12 @@ if [[ "$scenario" == "k8s-snap" ]]; then
             exit 1
         fi
     fi
+
+    configure_k8s_sizing "$k8s_control_plane_count" "$k8s_worker_count"
+fi
+
+if [[ "$scenario" == "microcloud" ]]; then
+    configure_microcloud_sizing
 fi
 
 log_info "Setting up OpenTofu workspace: ${workspace_name}..."
@@ -568,12 +1231,21 @@ if [[ "$scenario" == "k8s-snap" ]]; then
     tofu_apply_args+=(
         -var="k8s_control_plane_count=${k8s_control_plane_count}"
         -var="k8s_worker_count=${k8s_worker_count}"
+        -var="k8s_control_plane_cpu=${K8S_CONTROL_PLANE_CPU}"
+        -var="k8s_control_plane_memory_gib=${K8S_CONTROL_PLANE_MEMORY_GIB}"
+        -var="k8s_worker_cpu=${K8S_WORKER_CPU}"
+        -var="k8s_worker_memory_gib=${K8S_WORKER_MEMORY_GIB}"
     )
     log_info "K8s topology: ${k8s_control_plane_count} control-plane node(s), ${k8s_worker_count} worker-only node(s)"
+    log_info "K8s sizing: cp=${K8S_CONTROL_PLANE_CPU}vCPU/${K8S_CONTROL_PLANE_MEMORY_GIB}GB, worker=${K8S_WORKER_CPU}vCPU/${K8S_WORKER_MEMORY_GIB}GB"
 elif [[ "$scenario" == "microcloud" ]]; then
     # Work around intermittent terraform-lxd provider state race during
     # concurrent volume creation by applying MicroCloud resources serially.
     tofu_apply_args+=(
+        -var="microcloud_node_cpu=${MICROCLOUD_NODE_CPU}"
+        -var="microcloud_node_memory_mb=${MICROCLOUD_NODE_MEMORY_MB}"
+        -var="microcloud_root_disk_size_gib=${MICROCLOUD_ROOT_DISK_GIB}"
+        -var="microcloud_ceph_disk_size_gib=${MICROCLOUD_CEPH_DISK_GIB}"
         -parallelism=1
     )
 fi
@@ -585,11 +1257,13 @@ if [[ "$scenario" == "k8s-snap" ]]; then
     ansible-playbook -i "$inventory_file" playbooks/k8s_snap.yml
     log_success "K8s Lab Deployed Successfully!"
     print_k8s_summary "$workspace_name"
-    log_info "To access the machines, run: ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
+    print_section "Access"
+    print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
 elif [[ "$scenario" == "microcloud" ]]; then
     log_info "Running Ansible Orchestration for MicroCloud..."
     ansible-playbook -i "$inventory_file" playbooks/microcloud.yml
     log_success "MicroCloud Lab Deployed Successfully!"
     print_microcloud_summary "$workspace_name"
-    log_info "To access the machines, run: ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
+    print_section "Access"
+    print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
 fi

@@ -64,6 +64,50 @@ variable "k8s_worker_count" {
   }
 }
 
+variable "k8s_control_plane_cpu" {
+  description = "vCPU count per Kubernetes control-plane node"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.k8s_control_plane_cpu >= 1
+    error_message = "k8s_control_plane_cpu must be 1 or greater."
+  }
+}
+
+variable "k8s_control_plane_memory_gib" {
+  description = "Memory in GiB per Kubernetes control-plane node"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.k8s_control_plane_memory_gib >= 1
+    error_message = "k8s_control_plane_memory_gib must be 1 or greater."
+  }
+}
+
+variable "k8s_worker_cpu" {
+  description = "vCPU count per Kubernetes worker node"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.k8s_worker_cpu >= 1
+    error_message = "k8s_worker_cpu must be 1 or greater."
+  }
+}
+
+variable "k8s_worker_memory_gib" {
+  description = "Memory in GiB per Kubernetes worker node"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.k8s_worker_memory_gib >= 1
+    error_message = "k8s_worker_memory_gib must be 1 or greater."
+  }
+}
+
 variable "lxd_network_name" {
   description = "Primary LXD bridge network name used for VM eth0"
   type        = string
@@ -72,6 +116,50 @@ variable "lxd_network_name" {
 variable "lxd_storage_pool" {
   description = "LXD storage pool name used for VM root disks and MicroCloud Ceph disks"
   type        = string
+}
+
+variable "microcloud_node_cpu" {
+  description = "vCPU count per MicroCloud node"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.microcloud_node_cpu >= 1
+    error_message = "microcloud_node_cpu must be 1 or greater."
+  }
+}
+
+variable "microcloud_node_memory_mb" {
+  description = "Memory in MiB per MicroCloud node"
+  type        = number
+  default     = 4096
+
+  validation {
+    condition     = var.microcloud_node_memory_mb >= 1024
+    error_message = "microcloud_node_memory_mb must be at least 1024 MiB."
+  }
+}
+
+variable "microcloud_root_disk_size_gib" {
+  description = "Root disk size in GiB per MicroCloud node"
+  type        = number
+  default     = 40
+
+  validation {
+    condition     = var.microcloud_root_disk_size_gib >= 20
+    error_message = "microcloud_root_disk_size_gib must be at least 20 GiB."
+  }
+}
+
+variable "microcloud_ceph_disk_size_gib" {
+  description = "Ceph data disk size in GiB per MicroCloud node"
+  type        = number
+  default     = 50
+
+  validation {
+    condition     = var.microcloud_ceph_disk_size_gib >= 10
+    error_message = "microcloud_ceph_disk_size_gib must be at least 10 GiB."
+  }
 }
 
 locals {
@@ -104,7 +192,7 @@ resource "lxd_profile" "lab_base" {
     properties = {
       pool = var.lxd_storage_pool
       path = "/"
-      size = "40GiB"
+      size = "${var.microcloud_root_disk_size_gib}GiB"
     }
   }
 }
@@ -129,7 +217,7 @@ resource "lxd_volume" "microcloud_ceph_disks" {
   name         = "${local.lxd_prefix}-ceph-${count.index + 1}"
   pool         = var.lxd_storage_pool
   content_type = "block"
-  config       = { size = "50GiB" }
+  config       = { size = "${var.microcloud_ceph_disk_size_gib}GiB" }
 }
 
 resource "lxd_instance" "microcloud_nodes" {
@@ -140,8 +228,8 @@ resource "lxd_instance" "microcloud_nodes" {
   profiles = [lxd_profile.lab_base.name]
 
   limits = {
-    cpu    = "2"
-    memory = "4GiB"
+    cpu    = tostring(var.microcloud_node_cpu)
+    memory = "${var.microcloud_node_memory_mb}MiB"
   }
 
   # Second Network Interface (MicroOVN)
@@ -182,8 +270,8 @@ resource "lxd_instance" "k8s_control_plane_nodes" {
   profiles = [lxd_profile.lab_base.name]
 
   limits = {
-    cpu    = "2"
-    memory = "4GiB"
+    cpu    = tostring(var.k8s_control_plane_cpu)
+    memory = "${var.k8s_control_plane_memory_gib}GiB"
   }
 
   config = {
@@ -203,8 +291,8 @@ resource "lxd_instance" "k8s_worker_nodes" {
   profiles = [lxd_profile.lab_base.name]
 
   limits = {
-    cpu    = "2"
-    memory = "4GiB"
+    cpu    = tostring(var.k8s_worker_cpu)
+    memory = "${var.k8s_worker_memory_gib}GiB"
   }
 
   config = {
