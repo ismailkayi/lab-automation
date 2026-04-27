@@ -108,14 +108,7 @@
 
     - name: Select non-overlapping OVN subnet base
       set_fact:
-        ovn_subnet_base: >-
-          {% if lookup_subnet.startswith('10.') %}
-          192.168.250
-          {% elif lookup_subnet.startswith('192.168.') %}
-          10.250.1
-          {% else %}
-          10.250.1
-          {% endif %}
+        ovn_subnet_base: "{{ '192.168.250' if lookup_subnet.startswith('10.') else '10.250.1' }}"
 
     - name: Read preferred UPLINK network name state in LXD
       command: lxc network show UPLINK

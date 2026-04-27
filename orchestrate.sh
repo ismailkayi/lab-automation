@@ -245,18 +245,14 @@ reconcile_microcloud_orphans_with_state() {
 get_node_primary_ip() {
     local node="$1"
     local ip=""
+    local lxc_row=""
 
     ip=$(lxc exec "$node" -- sh -c "ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if(\$i==\"src\") {print \$(i+1); exit}}'" 2>/dev/null || true)
     ip="$(echo "$ip" | tr -d '[:space:]')"
 
     if [[ -z "$ip" ]]; then
-        ip=$(lxc list "$node" --format json 2>/dev/null | python3 -c 'import json, sys; data=json.load(sys.stdin); nets=(data[0].get("state", {}) or {}).get("network", {}); 
-for details in nets.values():
-    for addr in details.get("addresses", []):
-        if addr.get("family") == "inet":
-            print(addr.get("address", ""))
-            raise SystemExit(0)
-' 2>/dev/null || true)
+        lxc_row=$(lxc list --format csv 2>/dev/null | awk -F',' -v node="$node" '$1==node {print; exit}')
+        ip=$(echo "$lxc_row" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1)
     fi
 
     echo "$ip"
@@ -265,13 +261,7 @@ for details in nets.values():
 list_lxd_instances_by_prefix() {
     local prefix="$1"
 
-    lxc list --format json 2>/dev/null | python3 -c 'import json, sys
-prefix = sys.argv[1]
-for inst in json.load(sys.stdin):
-    name = inst.get("name", "")
-    if name.startswith(prefix):
-        print(name)
-' "$prefix"
+    lxc list --format csv 2>/dev/null | awk -F',' -v prefix="$prefix" 'index($1, prefix) == 1 {print $1}'
 }
 
 print_microcloud_summary() {
