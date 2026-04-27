@@ -42,16 +42,6 @@
       when: item.rc != 0
       changed_when: true
 
-# --- Bootstrap the MicroCloud cluster from the first node ---
-- name: Bootstrap MicroCloud Cluster (Node 1)
-  hosts: microcloud[0]
-  tasks:
-    - name: Derive /24 lookup subnet from node's default IPv4 address
-      # ansible_default_ipv4.address gives e.g. "10.88.0.10"
-      # We strip the last octet and append ".0/24" → "10.88.0.0/24"
-      set_fact:
-        lookup_subnet: "{{ ansible_facts['default_ipv4']['address'].split('.')[:-1] | join('.') + '.0/24' }}"
-
     - name: Detect OVN uplink interface (no IP assigned, not lo, not primary)
       # MicroCloud OVN requires a dedicated interface with no IP address.
       # We find the first interface that has no IPv4 address and is not lo or
@@ -87,14 +77,15 @@
       fail:
         msg: >
           Could not find a network interface without an IPv4 address for use as
-          the OVN uplink. Ensure each node has a dedicated NIC with no IP assigned.
+          the OVN uplink on {{ inventory_hostname }}. Ensure each node has a
+          dedicated NIC with no IP assigned.
       when: ovn_iface_detect.stdout | trim == ""
 
     - name: Fail if no non-root disk is available for Ceph
       fail:
         msg: >
-          Could not find a suitable non-root block device for Ceph. Ensure each
-          MicroCloud node has an extra disk attached.
+          Could not find a suitable non-root block device for Ceph on
+          {{ inventory_hostname }}. Ensure each MicroCloud node has an extra disk attached.
       when: ceph_disk_detect.stdout | trim == ""
 
     - name: Set OVN uplink interface fact
@@ -104,6 +95,16 @@
     - name: Set Ceph disk path fact
       set_fact:
         ceph_disk_path: "{{ ceph_disk_detect.stdout | trim }}"
+
+# --- Bootstrap the MicroCloud cluster from the first node ---
+- name: Bootstrap MicroCloud Cluster (Node 1)
+  hosts: microcloud[0]
+  tasks:
+    - name: Derive /24 lookup subnet from node's default IPv4 address
+      # ansible_default_ipv4.address gives e.g. "10.88.0.10"
+      # We strip the last octet and append ".0/24" → "10.88.0.0/24"
+      set_fact:
+        lookup_subnet: "{{ ansible_facts['default_ipv4']['address'].split('.')[:-1] | join('.') + '.0/24' }}"
 
     - name: Write MicroCloud preseed file to /tmp
       copy:
@@ -182,7 +183,7 @@
         ovn_uplink_created: "{{ ovn_uplink_show.rc == 0 and ('status: Created' in ovn_uplink_show.stdout) }}"
 
     - name: Create or complete OVN UPLINK target config on each node
-      command: lxc network create UPLINK --type=physical parent={{ ovn_uplink_iface }} --target={{ item }}
+      command: lxc network create UPLINK --type=physical parent={{ hostvars[item].ovn_uplink_iface }} --target={{ item }}
       loop: "{{ groups['microcloud'] }}"
       register: uplink_target_create
       changed_when: uplink_target_create.rc == 0
