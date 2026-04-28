@@ -742,6 +742,30 @@ normalize_lab_prefix_input() {
     echo "$normalized_input"
 }
 
+get_k8s_sizing_from_state() {
+    local workspace_name="$1"
+    local lxd_prefix="${workspace_name//_/-}"
+    local cp_node="${lxd_prefix}-k8s-cp-1"
+    local worker_node="${lxd_prefix}-k8s-worker-1"
+    local cp_cpu="2"
+    local cp_mem_gib="4"
+    local worker_cpu="2"
+    local worker_mem_gib="4"
+    local mem_raw=""
+
+    cp_cpu=$(lxc config get "$cp_node" limits.cpu 2>/dev/null || echo 2)
+    mem_raw=$(lxc config get "$cp_node" limits.memory 2>/dev/null || echo "4GiB")
+    cp_mem_gib=$(echo "$mem_raw" | grep -Eo '[0-9]+')
+
+    if lxc info "$worker_node" >/dev/null 2>&1; then
+        worker_cpu=$(lxc config get "$worker_node" limits.cpu 2>/dev/null || echo 2)
+        mem_raw=$(lxc config get "$worker_node" limits.memory 2>/dev/null || echo "4GiB")
+        worker_mem_gib=$(echo "$mem_raw" | grep -Eo '[0-9]+')
+    fi
+
+    echo "${cp_cpu} ${cp_mem_gib} ${worker_cpu} ${worker_mem_gib}"
+}
+
 get_k8s_topology_from_state() {
     local workspace_name="$1"
     local previous_workspace=""
@@ -1059,7 +1083,7 @@ destroy_menu() {
 
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}    CANONICAL IaC DEPLOYMENT ENGINE (TOFU + ANSIBLE)       ${NC}"
+echo -e "${CYAN}         CANONICAL LAB DEPLOYMENT ENGINE                  ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 
 ensure_tools
@@ -1206,7 +1230,17 @@ if [[ "$scenario" == "k8s-snap" ]]; then
         fi
     fi
 
-    configure_k8s_sizing "$k8s_control_plane_count" "$k8s_worker_count"
+    if [[ "$k8s_update_action" == "add" ]]; then
+        read -r K8S_CONTROL_PLANE_CPU K8S_CONTROL_PLANE_MEMORY_GIB K8S_WORKER_CPU K8S_WORKER_MEMORY_GIB < <(
+            get_k8s_sizing_from_state "$workspace_name"
+        )
+        print_section "K8s Sizing (preserved from existing nodes)"
+        print_kv "Control-plane" "${K8S_CONTROL_PLANE_CPU} vCPU / ${K8S_CONTROL_PLANE_MEMORY_GIB} GB"
+        print_kv "Worker" "${K8S_WORKER_CPU} vCPU / ${K8S_WORKER_MEMORY_GIB} GB"
+        print_kv "Note" "New nodes will be created with the same sizing as existing nodes"
+    else
+        configure_k8s_sizing "$k8s_control_plane_count" "$k8s_worker_count"
+    fi
 fi
 
 if [[ "$scenario" == "microcloud" ]]; then
