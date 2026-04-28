@@ -264,7 +264,7 @@ resource "lxd_instance" "microcloud_nodes" {
 # --- K8S SNAP NODES ---
 resource "lxd_instance" "k8s_control_plane_nodes" {
   count    = var.scenario == "k8s-snap" ? var.k8s_control_plane_count : 0
-  name     = "${local.lxd_prefix}-k8s-cp-${count.index + 1}"
+  name     = "${local.lxd_prefix}-cp-${count.index + 1}"
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
@@ -285,7 +285,7 @@ resource "lxd_instance" "k8s_control_plane_nodes" {
 
 resource "lxd_instance" "k8s_worker_nodes" {
   count    = var.scenario == "k8s-snap" ? var.k8s_worker_count : 0
-  name     = "${local.lxd_prefix}-k8s-worker-${count.index + 1}"
+  name     = "${local.lxd_prefix}-worker-${count.index + 1}"
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]

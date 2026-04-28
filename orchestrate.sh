@@ -745,8 +745,8 @@ normalize_lab_prefix_input() {
 get_k8s_sizing_from_state() {
     local workspace_name="$1"
     local lxd_prefix="${workspace_name//_/-}"
-    local cp_node="${lxd_prefix}-k8s-cp-1"
-    local worker_node="${lxd_prefix}-k8s-worker-1"
+    local cp_node="${lxd_prefix}-cp-1"
+    local worker_node="${lxd_prefix}-worker-1"
     local cp_cpu="2"
     local cp_mem_gib="4"
     local worker_cpu="2"
@@ -954,8 +954,8 @@ print_k8s_summary() {
     local first_cp=""
     local api_ip=""
 
-    mapfile -t cp_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-k8s-cp-" || true)
-    mapfile -t worker_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-k8s-worker-" || true)
+    mapfile -t cp_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-cp-" || true)
+    mapfile -t worker_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-worker-" || true)
 
     if [[ ${#cp_nodes[@]} -eq 0 ]]; then
         log_warn "Could not find K8s control-plane nodes for summary output."

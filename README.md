@@ -80,6 +80,12 @@ You will then choose one of these options:
 3) Destroy Environments
 ```
 
+## Visual Walkthrough
+
+Main action menu:
+
+![Main menu](docs/images/main-menu.png)
+
 
 ## How Naming Works
 
@@ -123,6 +129,10 @@ During Kubernetes deployment, VM sizing is calculated dynamically from host reso
 - Control-plane and worker nodes are sized separately
 - CPU and memory values are rounded to practical, commonly used tiers
 - `custom` lets you enter per-node vCPU and memory (GB)
+
+Sizing advisor example:
+
+![K8s sizing advisor](docs/images/k8s-sizing.png)
 
 At the end of a successful deployment, the script prints:
 
