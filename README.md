@@ -173,6 +173,10 @@ During MicroCloud deployment, the script scans host resources and suggests per-n
 
 For `custom`, values are entered as per-node `vCPU`, `memory (GB)`, `root disk (GB)`, and `ceph disk (GB)`.
 
+Sizing advisor example:
+
+![MicroCloud sizing advisor](docs/images/microcloud-sizing.png)
+
 At the end of a successful deployment, the script prints:
 
 - cluster health
