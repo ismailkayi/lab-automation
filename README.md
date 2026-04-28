@@ -183,6 +183,10 @@ At the end of a successful deployment, the script prints:
 - cluster nodes
 - UI access links on port `8443`
 
+Deployment status example:
+
+![MicroCloud status](docs/images/microcloud-status.png)
+
 ## Destroying an Environment
 
 Choose:
@@ -195,6 +199,10 @@ Then:
 
 1. Select the environment from the list
 2. Confirm by typing `yes`
+
+Destroy confirmation example:
+
+![Destroy confirmation](docs/images/confirm-destroy.png)
 
 ## SSH Access
 
