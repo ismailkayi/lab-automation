@@ -80,6 +80,12 @@ You will then choose one of these options:
 3) Destroy Environments
 ```
 
+## Visual Walkthrough
+
+Main action menu:
+
+![Main menu](docs/images/main-menu.png)
+
 
 ## How Naming Works
 
@@ -124,6 +130,10 @@ During Kubernetes deployment, VM sizing is calculated dynamically from host reso
 - CPU and memory values are rounded to practical, commonly used tiers
 - `custom` lets you enter per-node vCPU and memory (GB)
 
+Sizing advisor example:
+
+![K8s sizing advisor](docs/images/k8s-sizing.png)
+
 At the end of a successful deployment, the script prints:
 
 - cluster nodes
@@ -163,11 +173,19 @@ During MicroCloud deployment, the script scans host resources and suggests per-n
 
 For `custom`, values are entered as per-node `vCPU`, `memory (GB)`, `root disk (GB)`, and `ceph disk (GB)`.
 
+Sizing advisor example:
+
+![MicroCloud sizing advisor](docs/images/microcloud-sizing.png)
+
 At the end of a successful deployment, the script prints:
 
 - cluster health
 - cluster nodes
 - UI access links on port `8443`
+
+Deployment status example:
+
+![MicroCloud status](docs/images/microcloud-status.png)
 
 ## Destroying an Environment
 
@@ -181,6 +199,10 @@ Then:
 
 1. Select the environment from the list
 2. Confirm by typing `yes`
+
+Destroy confirmation example:
+
+![Destroy confirmation](docs/images/confirm-destroy.png)
 
 ## SSH Access
 
