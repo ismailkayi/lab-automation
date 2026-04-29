@@ -33,10 +33,26 @@
     juju_cp_hosts: "{{ groups['k8s_juju_cp'] | default([]) }}"
     juju_worker_hosts: "{{ groups['k8s_juju_workers'] | default([]) }}"
     juju_machine_hosts: "{{ juju_cp_hosts + juju_worker_hosts }}"
+    juju_bin: "juju"
   tasks:
-    - name: Ensure Juju CLI exists on host
+    - name: Check if Juju exists in PATH
       command: command -v juju
       register: juju_bin_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check if Juju exists at /snap/bin/juju
+      stat:
+        path: /snap/bin/juju
+      register: juju_snap_bin
+
+    - name: Set Juju binary path
+      set_fact:
+        juju_bin: "{{ '/snap/bin/juju' if juju_bin_check.rc != 0 and juju_snap_bin.stat.exists else 'juju' }}"
+
+    - name: Validate Juju binary is executable
+      command: "{{ juju_bin }} version"
+      register: juju_version_check
       changed_when: false
       failed_when: false
 
@@ -45,10 +61,11 @@
         msg: >
           Juju CLI is not installed on host. Install it and rerun:
           sudo snap install juju --classic
-      when: juju_bin_check.rc != 0
+          (If already installed via snap, ensure /snap/bin is in PATH.)
+      when: juju_version_check.rc != 0
 
     - name: Check if Juju controller already bootstrapped
-      command: juju controllers --format json
+      command: "{{ juju_bin }} controllers --format json"
       register: juju_ctrl_check
       changed_when: false
       failed_when: false
@@ -61,7 +78,7 @@
 
     - name: Bootstrap Juju manual cloud on controller VM
       command: >
-        juju bootstrap
+        {{ juju_bin }} bootstrap
         manual/ubuntu@{{ juju_controller_ip }}
         {{ juju_controller }}
       when: >
@@ -69,7 +86,7 @@
         juju_controller not in (juju_ctrl_check.stdout | default(''))
 
     - name: Add or reuse Juju model
-      command: "juju add-model {{ juju_model }} {{ juju_controller }}"
+      command: "{{ juju_bin }} add-model {{ juju_model }} {{ juju_controller }}"
       register: add_model_result
       failed_when:
         - add_model_result.rc != 0
@@ -85,7 +102,7 @@
 
     - name: Add Juju machines for Kubernetes nodes
       command: >
-        juju add-machine
+        {{ juju_bin }} add-machine
         -m {{ juju_controller }}:{{ juju_model }}
         ssh:ubuntu@{{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}
       loop: "{{ juju_machine_hosts }}"
@@ -97,7 +114,7 @@
 
     - name: Check if k8s application is already deployed
       command: >
-        juju status -m {{ juju_controller }}:{{ juju_model }}
+        {{ juju_bin }} status -m {{ juju_controller }}:{{ juju_model }}
         --format json
       register: juju_status
       changed_when: false
@@ -105,7 +122,7 @@
 
     - name: Deploy canonical-kubernetes bundle
       command: >
-        juju deploy canonical-kubernetes
+        {{ juju_bin }} deploy canonical-kubernetes
         -m {{ juju_controller }}:{{ juju_model }}
         --map-machines existing
         --num-units {{ juju_machine_hosts | length }}
@@ -119,14 +136,14 @@
 
     - name: Wait for Juju deployment to settle
       command: >
-        juju status
+        {{ juju_bin }} status
         -m {{ juju_controller }}:{{ juju_model }}
         --wait=30m
       changed_when: false
 
     - name: Show final Juju status
       command: >
-        juju status
+        {{ juju_bin }} status
         -m {{ juju_controller }}:{{ juju_model }}
         --color
       register: final_juju_status
@@ -138,7 +155,7 @@
 
     - name: Fetch kubeconfig from k8s/leader
       command: >
-        juju run k8s/leader get-kubeconfig
+        {{ juju_bin }} run k8s/leader get-kubeconfig
         -m {{ juju_controller }}:{{ juju_model }}
         --format plain
       register: kubeconfig_out
@@ -147,7 +164,7 @@
 
     - name: Fetch kubeconfig from canonical-kubernetes/leader (fallback)
       command: >
-        juju run canonical-kubernetes/leader get-kubeconfig
+        {{ juju_bin }} run canonical-kubernetes/leader get-kubeconfig
         -m {{ juju_controller }}:{{ juju_model }}
         --format plain
       register: kubeconfig_out_fallback
