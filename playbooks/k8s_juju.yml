@@ -2,23 +2,14 @@
 # ==============================================================================
 # Canonical Kubernetes via Juju
 # Deploys Canonical K8s using the canonical-kubernetes bundle on VMs provisioned
-# by OpenTofu/LXD. Juju CLI runs on the host (localhost) to avoid
-# snap confinement/cgroup issues in LXD guest agent sessions.
+# by OpenTofu/LXD.
+#
+# Design notes:
+# - Keep VM-side prep minimal (wait, facts, snapd seed, juju install on controller).
+# - Run Juju operations through `lxc exec <controller> ... juju ...` from localhost.
+#   This avoids both host-Juju dependency and snap/cgroup issues seen in Ansible
+#   remote sessions inside LXD guests.
 # ==============================================================================
-
-- name: Collect host UID for Juju SSH compatibility
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  tasks:
-    - name: Read local host UID
-      command: id -u
-      register: local_uid_cmd
-      changed_when: false
-
-    - name: Store local host UID fact
-      set_fact:
-        juju_local_uid: "{{ local_uid_cmd.stdout | trim }}"
 
 - name: Wait for Juju nodes and gather facts
   hosts: k8s_juju_controller:k8s_juju_cp:k8s_juju_workers
@@ -35,22 +26,66 @@
       command: snap wait system seed.loaded
       changed_when: false
 
-    - name: Check if local host UID exists on node
-      command: "getent passwd {{ hostvars['localhost']['juju_local_uid'] }}"
-      register: local_uid_entry
+- name: Install Juju and prepare SSH key on controller
+  hosts: k8s_juju_controller
+  gather_facts: false
+  vars:
+    juju_channel: "3/stable"
+    juju_user: "ubuntu"
+    juju_home: "/home/ubuntu"
+  tasks:
+    - name: Check if juju snap is installed on controller
+      command: snap list juju
+      register: juju_snap_check
       changed_when: false
       failed_when: false
 
-    - name: Ensure local host UID exists on node for Juju
-      user:
-        name: "jujuuid{{ hostvars['localhost']['juju_local_uid'] }}"
-        uid: "{{ hostvars['localhost']['juju_local_uid'] | int }}"
-        create_home: false
-        shell: "/usr/sbin/nologin"
+    - name: Install juju snap on controller if missing
+      command: "snap install juju --channel={{ juju_channel }}"
+      when: juju_snap_check.rc != 0
+      changed_when: true
       become: true
-      when: local_uid_entry.rc != 0
 
-- name: Bootstrap Juju and deploy Canonical Kubernetes from host
+    - name: Ensure controller ubuntu SSH directory exists
+      file:
+        path: "{{ juju_home }}/.ssh"
+        state: directory
+        mode: "0700"
+        owner: "{{ juju_user }}"
+        group: "{{ juju_user }}"
+      become: true
+
+    - name: Ensure controller Juju SSH key exists
+      command: ssh-keygen -t ed25519 -N '' -f {{ juju_home }}/.ssh/id_ed25519
+      args:
+        creates: "{{ juju_home }}/.ssh/id_ed25519"
+      become: true
+      become_user: "{{ juju_user }}"
+
+    - name: Read controller Juju public key
+      slurp:
+        src: "{{ juju_home }}/.ssh/id_ed25519.pub"
+      register: juju_controller_pubkey_raw
+      become: true
+
+    - name: Store controller Juju public key
+      set_fact:
+        juju_controller_pubkey: "{{ juju_controller_pubkey_raw.content | b64decode | trim }}"
+
+- name: Trust controller Juju key on all Juju nodes
+  hosts: k8s_juju_controller:k8s_juju_cp:k8s_juju_workers
+  gather_facts: false
+  vars:
+    juju_controller_host: "{{ groups['k8s_juju_controller'][0] }}"
+  tasks:
+    - name: Authorize controller Juju key for ubuntu
+      authorized_key:
+        user: ubuntu
+        key: "{{ hostvars[juju_controller_host]['juju_controller_pubkey'] }}"
+        state: present
+      become: true
+
+- name: Bootstrap Juju and deploy Canonical Kubernetes
   hosts: localhost
   connection: local
   gather_facts: false
@@ -59,55 +94,20 @@
     juju_controller: "lab-controller"
     juju_controller_host: "{{ groups['k8s_juju_controller'][0] }}"
     juju_controller_ip: "{{ hostvars[juju_controller_host]['ansible_facts']['default_ipv4']['address'] }}"
-    juju_cp_hosts: "{{ groups['k8s_juju_cp'] | default([]) }}"
-    juju_worker_hosts: "{{ groups['k8s_juju_workers'] | default([]) }}"
-    juju_machine_hosts: "{{ juju_cp_hosts + juju_worker_hosts }}"
-    juju_bin: "juju"
+    juju_machine_hosts: "{{ (groups['k8s_juju_cp'] | default([])) + (groups['k8s_juju_workers'] | default([])) }}"
   tasks:
-    - name: Check if Juju exists in PATH
-      command: command -v juju
-      register: juju_bin_check
-      changed_when: false
-      failed_when: false
-
-    - name: Check if Juju exists at /snap/bin/juju
-      stat:
-        path: /snap/bin/juju
-      register: juju_snap_bin
-
-    - name: Set Juju binary path
-      set_fact:
-        juju_bin: "{{ '/snap/bin/juju' if juju_bin_check.rc != 0 and juju_snap_bin.stat.exists else 'juju' }}"
-
-    - name: Validate Juju binary is executable
-      command: "{{ juju_bin }} version"
-      register: juju_version_check
-      changed_when: false
-      failed_when: false
-
-    - name: Fail if Juju CLI is missing on host
-      fail:
-        msg: >
-          Juju CLI is not installed on host. Install it and rerun:
-          sudo snap install juju --classic
-          (If already installed via snap, ensure /snap/bin is in PATH.)
-      when: juju_version_check.rc != 0
-
     - name: Check if Juju controller already bootstrapped
-      command: "{{ juju_bin }} controllers --format json"
+      command: >
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju controllers --format json
       register: juju_ctrl_check
       changed_when: false
       failed_when: false
 
-    - name: Add controller IP to known_hosts
-      known_hosts:
-        name: "{{ juju_controller_ip }}"
-        key: "{{ lookup('pipe', 'ssh-keyscan -H ' + juju_controller_ip) }}"
-        state: present
-
     - name: Bootstrap Juju manual cloud on controller VM
       command: >
-        {{ juju_bin }} bootstrap
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju bootstrap
         manual/ubuntu@{{ juju_controller_ip }}
         {{ juju_controller }}
       when: >
@@ -115,23 +115,28 @@
         juju_controller not in (juju_ctrl_check.stdout | default(''))
 
     - name: Add or reuse Juju model
-      command: "{{ juju_bin }} add-model {{ juju_model }} {{ juju_controller }}"
+      command: >
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju add-model {{ juju_model }} {{ juju_controller }}
       register: add_model_result
       failed_when:
         - add_model_result.rc != 0
         - "'already exists' not in (add_model_result.stderr | default(''))"
       changed_when: add_model_result.rc == 0
 
-    - name: Add Juju machine target IPs to known_hosts
-      known_hosts:
-        name: "{{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}"
-        key: "{{ lookup('pipe', 'ssh-keyscan -H ' + hostvars[item]['ansible_facts']['default_ipv4']['address']) }}"
-        state: present
-      loop: "{{ juju_machine_hosts }}"
+    - name: Ensure controller known_hosts has all target node IPs
+      command: >
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H bash -lc
+        "ssh-keyscan -H {{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }} >> ~/.ssh/known_hosts"
+      loop: "{{ [juju_controller_host] + juju_machine_hosts }}"
+      changed_when: false
+      failed_when: false
 
     - name: Add Juju machines for Kubernetes nodes
       command: >
-        {{ juju_bin }} add-machine
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju add-machine
         -m {{ juju_controller }}:{{ juju_model }}
         ssh:ubuntu@{{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}
       loop: "{{ juju_machine_hosts }}"
@@ -143,7 +148,8 @@
 
     - name: Check if k8s application is already deployed
       command: >
-        {{ juju_bin }} status -m {{ juju_controller }}:{{ juju_model }}
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju status -m {{ juju_controller }}:{{ juju_model }}
         --format json
       register: juju_status
       changed_when: false
@@ -151,7 +157,8 @@
 
     - name: Deploy canonical-kubernetes bundle
       command: >
-        {{ juju_bin }} deploy canonical-kubernetes
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju deploy canonical-kubernetes
         -m {{ juju_controller }}:{{ juju_model }}
         --map-machines existing
         --num-units {{ juju_machine_hosts | length }}
@@ -165,14 +172,16 @@
 
     - name: Wait for Juju deployment to settle
       command: >
-        {{ juju_bin }} status
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju status
         -m {{ juju_controller }}:{{ juju_model }}
         --wait=30m
       changed_when: false
 
     - name: Show final Juju status
       command: >
-        {{ juju_bin }} status
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju status
         -m {{ juju_controller }}:{{ juju_model }}
         --color
       register: final_juju_status
@@ -184,7 +193,8 @@
 
     - name: Fetch kubeconfig from k8s/leader
       command: >
-        {{ juju_bin }} run k8s/leader get-kubeconfig
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju run k8s/leader get-kubeconfig
         -m {{ juju_controller }}:{{ juju_model }}
         --format plain
       register: kubeconfig_out
@@ -193,7 +203,8 @@
 
     - name: Fetch kubeconfig from canonical-kubernetes/leader (fallback)
       command: >
-        {{ juju_bin }} run canonical-kubernetes/leader get-kubeconfig
+        lxc exec {{ juju_controller_host }} --
+        sudo -u ubuntu -H juju run canonical-kubernetes/leader get-kubeconfig
         -m {{ juju_controller }}:{{ juju_model }}
         --format plain
       register: kubeconfig_out_fallback

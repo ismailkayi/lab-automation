@@ -1535,5 +1535,5 @@ if [[ "$scenario" == "k8s-juju" ]]; then
     print_k8s_juju_summary "$workspace_name"
     print_section "Access"
     print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
-    print_kv "Kubeconfig" "juju run k8s/leader get-kubeconfig -m lab-controller:k8s-lab"
+    print_kv "Kubeconfig" "lxc exec <prefix>-juju-ctrl -- sudo -u ubuntu -H juju run k8s/leader get-kubeconfig -m lab-controller:k8s-lab"
 fi
