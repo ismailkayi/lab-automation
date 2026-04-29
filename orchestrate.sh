@@ -782,6 +782,22 @@ get_k8s_topology_from_state() {
     echo "${cp_count} ${worker_count}"
 }
 
+get_k8s_juju_topology_from_state() {
+    local workspace_name="$1"
+    local previous_workspace=""
+    local cp_count="0"
+    local worker_count="0"
+
+    previous_workspace=$(tofu workspace show 2>/dev/null || echo "default")
+    tofu workspace select "$workspace_name" >/dev/null 2>&1
+
+    cp_count=$(tofu state list 2>/dev/null | grep -c '^lxd_instance\.k8s_juju_cp_nodes\[' || true)
+    worker_count=$(tofu state list 2>/dev/null | grep -c '^lxd_instance\.k8s_juju_worker_nodes\[' || true)
+
+    tofu workspace select "$previous_workspace" >/dev/null 2>&1
+    echo "${cp_count} ${worker_count}"
+}
+
 destroy_environment() {
     local env_name="$1"
     local env_prefix="$2"
@@ -801,6 +817,13 @@ destroy_environment() {
         destroy_args+=(
             -var="k8s_control_plane_count=${env_k8s_cp_count}"
             -var="k8s_worker_count=${env_k8s_worker_count}"
+        )
+    fi
+
+    if [[ "$env_scenario" == "k8s-juju" ]]; then
+        destroy_args+=(
+            -var="k8s_juju_cp_count=${env_k8s_cp_count}"
+            -var="k8s_juju_worker_count=${env_k8s_worker_count}"
         )
     fi
 
@@ -1007,6 +1030,42 @@ print_k8s_summary() {
     done < <(lxc exec "$first_cp" -- k8s kubectl get nodes -o wide --no-headers)
 }
 
+print_k8s_juju_summary() {
+    local ws_name="$1"
+    local lxd_prefix="${ws_name//_/-}"
+    local ctrl_node="${lxd_prefix}-juju-ctrl"
+    local first_cp=""
+    local api_ip=""
+
+    mapfile -t cp_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-juju-cp-" || true)
+    mapfile -t worker_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-juju-worker-" || true)
+
+    print_section "K8s Juju Deployment Summary"
+    print_kv "Juju controller VM" "$ctrl_node"
+    print_kv "Control-plane nodes" "${#cp_nodes[@]}"
+    print_kv "Worker nodes" "${#worker_nodes[@]}"
+    echo ""
+
+    ctrl_ip=$(get_node_primary_ip "$ctrl_node")
+    print_kv "Juju controller IP" "${ctrl_ip:-N/A}"
+
+    echo ""
+    echo "Control-plane:"
+    for node in "${cp_nodes[@]}"; do
+        ip=$(get_node_primary_ip "$node")
+        printf '  - %s (%s)\n' "$node" "${ip:-N/A}"
+    done
+
+    if [[ ${#worker_nodes[@]} -gt 0 ]]; then
+        echo ""
+        echo "Workers:"
+        for node in "${worker_nodes[@]}"; do
+            ip=$(get_node_primary_ip "$node")
+            printf '  - %s (%s)\n' "$node" "${ip:-N/A}"
+        done
+    fi
+}
+
 ensure_tools() {
     if ! command -v tofu &> /dev/null; then
         log_info "Installing OpenTofu..."
@@ -1075,6 +1134,10 @@ destroy_menu() {
         current_k8s_worker_count=1
     fi
 
+    if [[ "$env_scenario" == "k8s-juju" ]]; then
+        read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_juju_topology_from_state "$selected_env")
+    fi
+
     log_warn "Destroying environment: ${selected_env}..."
     destroy_environment "$selected_env" "$env_prefix" "$env_scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
     
@@ -1093,11 +1156,12 @@ tofu init -v >/dev/null 2>&1
 echo ""
 echo "1) Deploy Canonical K8s (Snap)"
 echo "2) Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)"
-echo "3) Destroy Environments"
+echo "3) Deploy Canonical K8s (Juju)"
+echo "4) Destroy Environments"
 echo ""
 read -p "Select action: " action
 
-if [[ "$action" == "3" ]]; then
+if [[ "$action" == "4" ]]; then
     destroy_menu
     exit 0
 fi
@@ -1105,74 +1169,201 @@ fi
 case $action in
     1) scenario="k8s-snap" ;;
     2) scenario="microcloud" ;;
+    3) scenario="k8s-juju" ;;
     *) echo "Invalid selection."; exit 1 ;;
 esac
 
-echo ""
-log_info "Already deployed labs for ${scenario}:"
+# --- Lab selection menu ---
 mapfile -t existing_labs < <(list_existing_labs_for_scenario "$scenario")
+
+print_section "Existing Labs"
 if [[ ${#existing_labs[@]} -eq 0 ]]; then
-    log_info "- none"
+    echo "  No existing labs."
 else
-    for lab in "${existing_labs[@]}"; do
-        lab_prefix="${lab%_${scenario}}"
-        log_info "- ${lab_prefix}"
-    done
+    if [[ "$scenario" == "k8s-snap" ]]; then
+        printf '  %-20s %s\n' "Lab" "Topology"
+        printf '  %-20s %s\n' "--------------------" "--------"
+        for lab in "${existing_labs[@]}"; do
+            lab_prefix="${lab%_${scenario}}"
+            read -r _cp _w < <(get_k8s_topology_from_state "$lab")
+            printf '  %-20s %s CP / %s worker\n' "$lab_prefix" "$_cp" "$_w"
+        done
+    elif [[ "$scenario" == "k8s-juju" ]]; then
+        printf '  %-20s %s\n' "Lab" "Topology"
+        printf '  %-20s %s\n' "--------------------" "--------"
+        for lab in "${existing_labs[@]}"; do
+            lab_prefix="${lab%_${scenario}}"
+            read -r _cp _w < <(get_k8s_juju_topology_from_state "$lab")
+            printf '  %-20s %s CP / %s worker\n' "$lab_prefix" "$_cp" "$_w"
+        done
+    else
+        for lab in "${existing_labs[@]}"; do
+            lab_prefix="${lab%_${scenario}}"
+            printf '  - %s\n' "$lab_prefix"
+        done
+    fi
 fi
 
 echo ""
-read -p "Enter your lab-name/prefix (e.g., your name): " user_prefix_input
-user_prefix_input=$(normalize_lab_prefix_input "$user_prefix_input" "$scenario")
-user_prefix=$(echo "$user_prefix_input" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
-
-if [[ -z "$user_prefix" ]]; then
-    echo "Invalid lab-name. Use letters and/or numbers."
-    exit 1
+if [[ ${#existing_labs[@]} -gt 0 ]]; then
+    echo "  1) Deploy a new lab"
+    echo "  2) Manage an existing lab"
+    echo "  0) Cancel"
+    echo ""
+    read -p "Select: " lab_action_choice
+else
+    echo "  1) Deploy a new lab"
+    echo "  0) Cancel"
+    echo ""
+    read -p "Select: " lab_action_choice
 fi
 
-workspace_name="${user_prefix}_${scenario}"
-inventory_file="inventory_${workspace_name}.yaml"
+case "$lab_action_choice" in
+    0) echo "Cancelled."; exit 0 ;;
+    1) lab_intent="new" ;;
+    2)
+        if [[ ${#existing_labs[@]} -eq 0 ]]; then
+            echo "Invalid selection."; exit 1
+        fi
+        lab_intent="manage"
+        ;;
+    *) echo "Invalid selection."; exit 1 ;;
+esac
 
-existing_workspace=false
-if workspace_exists "$workspace_name"; then
-    existing_workspace=true
-fi
-
+# --- Resolve workspace ---
 k8s_update_action="new"
 current_k8s_cp_count=0
 current_k8s_worker_count=0
 k8s_control_plane_count=3
 k8s_worker_count=1
+k8s_juju_cp_count=1
+k8s_juju_worker_count=2
+K8S_JUJU_CP_CPU=2
+K8S_JUJU_CP_MEMORY_GIB=4
+K8S_JUJU_WORKER_CPU=2
+K8S_JUJU_WORKER_MEMORY_GIB=4
+user_prefix=""
+workspace_name=""
+inventory_file=""
+existing_workspace=false
 
-if [[ "$scenario" == "k8s-snap" && "$existing_workspace" == true ]]; then
-    read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_topology_from_state "$workspace_name")
-
-    log_warn "Existing K8s lab detected: ${workspace_name}"
-    log_info "Current topology: ${current_k8s_cp_count} control-plane node(s), ${current_k8s_worker_count} worker-only node(s)"
+if [[ "$lab_intent" == "new" ]]; then
     echo ""
-    read -p "Choose action for this existing lab [add/rebuild/cancel, default: add]: " existing_lab_action
-    existing_lab_action="${existing_lab_action:-add}"
+    read -p "Enter a name for your new lab (e.g., your name): " user_prefix_input
+    user_prefix=$(echo "$user_prefix_input" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
+    if [[ -z "$user_prefix" ]]; then
+        echo "Invalid lab name. Use letters and/or numbers."
+        exit 1
+    fi
+    workspace_name="${user_prefix}_${scenario}"
+    inventory_file="inventory_${workspace_name}.yaml"
+    if workspace_exists "$workspace_name"; then
+        echo "A lab named '${user_prefix}' already exists. Choose 'Manage an existing lab' to work with it."
+        exit 1
+    fi
+else
+    # Manage: show numbered list and let user pick
+    print_section "Select a lab to manage"
+    for i in "${!existing_labs[@]}"; do
+        lab="${existing_labs[$i]}"
+        lab_prefix="${lab%_${scenario}}"
+        if [[ "$scenario" == "k8s-snap" ]]; then
+            read -r _cp _w < <(get_k8s_topology_from_state "$lab")
+            printf '  %d) %-20s %s CP / %s worker\n' "$((i+1))" "$lab_prefix" "$_cp" "$_w"
+        elif [[ "$scenario" == "k8s-juju" ]]; then
+            read -r _cp _w < <(get_k8s_juju_topology_from_state "$lab")
+            printf '  %d) %-20s %s CP / %s worker\n' "$((i+1))" "$lab_prefix" "$_cp" "$_w"
+        else
+            printf '  %d) %s\n' "$((i+1))" "$lab_prefix"
+        fi
+    done
+    echo "  0) Cancel"
+    echo ""
+    read -p "Select: " lab_idx
+    if [[ "$lab_idx" == "0" || -z "$lab_idx" ]]; then
+        echo "Cancelled."; exit 0
+    fi
+    if ! [[ "$lab_idx" =~ ^[0-9]+$ ]] || (( lab_idx < 1 || lab_idx > ${#existing_labs[@]} )); then
+        echo "Invalid selection."; exit 1
+    fi
+    selected_lab="${existing_labs[$((lab_idx-1))]}"
+    user_prefix="${selected_lab%_${scenario}}"
+    workspace_name="$selected_lab"
+    inventory_file="inventory_${workspace_name}.yaml"
+    existing_workspace=true
 
-    case "$existing_lab_action" in
-        add)
-            k8s_update_action="add"
-            log_info "Update mode: add nodes to existing cluster."
-            ;;
-        rebuild)
-            k8s_update_action="rebuild"
-            log_warn "Rebuilding existing lab: ${workspace_name}"
-            destroy_environment "$workspace_name" "$user_prefix" "$scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
-            existing_workspace=false
-            ;;
-        cancel)
-            echo "Cancelled."
-            exit 0
-            ;;
-        *)
-            echo "Invalid choice. Allowed values: add, rebuild, cancel."
-            exit 1
-            ;;
-    esac
+    if [[ "$scenario" == "k8s-snap" ]]; then
+        read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_topology_from_state "$workspace_name")
+        print_section "Managing: ${user_prefix}"
+        print_kv "Current topology" "${current_k8s_cp_count} CP / ${current_k8s_worker_count} worker"
+        echo ""
+        read -p "Choose action [add/rebuild/cancel, default: add]: " existing_lab_action
+        existing_lab_action="${existing_lab_action:-add}"
+        case "$existing_lab_action" in
+            add)
+                k8s_update_action="add"
+                log_info "Update mode: add nodes to existing cluster."
+                ;;
+            rebuild)
+                k8s_update_action="rebuild"
+                log_warn "Rebuilding existing lab: ${workspace_name}"
+                destroy_environment "$workspace_name" "$user_prefix" "$scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
+                existing_workspace=false
+                ;;
+            cancel)
+                echo "Cancelled."; exit 0
+                ;;
+            *)
+                echo "Invalid choice. Allowed values: add, rebuild, cancel."
+                exit 1
+                ;;
+        esac
+    else
+        # MicroCloud manage menu
+        print_section "Managing: ${user_prefix} (MicroCloud)"
+        echo ""
+        echo "  1) Rebuild  (destroy and redeploy from scratch)"
+        echo "  0) Cancel"
+        echo ""
+        read -p "Select: " mc_manage_action
+        case "$mc_manage_action" in
+            1)
+                log_warn "Rebuilding MicroCloud lab: ${workspace_name}"
+                destroy_environment "$workspace_name" "$user_prefix" "$scenario"
+                existing_workspace=false
+                ;;
+            0|"")
+                echo "Cancelled."; exit 0
+                ;;
+            *)
+                echo "Invalid selection."; exit 1
+                ;;
+        esac
+    fi
+
+    if [[ "$scenario" == "k8s-juju" ]]; then
+        read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_juju_topology_from_state "$workspace_name")
+        print_section "Managing: ${user_prefix} (K8s Juju)"
+        print_kv "Current topology" "${current_k8s_cp_count} CP / ${current_k8s_worker_count} worker"
+        echo ""
+        echo "  1) Rebuild  (destroy and redeploy from scratch)"
+        echo "  0) Cancel"
+        echo ""
+        read -p "Select: " juju_manage_action
+        case "$juju_manage_action" in
+            1)
+                log_warn "Rebuilding K8s Juju lab: ${workspace_name}"
+                destroy_environment "$workspace_name" "$user_prefix" "$scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
+                existing_workspace=false
+                ;;
+            0|"")
+                echo "Cancelled."; exit 0
+                ;;
+            *)
+                echo "Invalid selection."; exit 1
+                ;;
+        esac
+    fi
 fi
 
 if [[ "$scenario" == "k8s-snap" ]]; then
@@ -1247,6 +1438,30 @@ if [[ "$scenario" == "microcloud" ]]; then
     configure_microcloud_sizing
 fi
 
+if [[ "$scenario" == "k8s-juju" ]]; then
+    echo ""
+    read -p "Number of control-plane nodes [default: 1, allowed: 1 or 3]: " k8s_juju_cp_count_input
+    k8s_juju_cp_count="${k8s_juju_cp_count_input:-1}"
+    if [[ "$k8s_juju_cp_count" != "1" && "$k8s_juju_cp_count" != "3" ]]; then
+        echo "Invalid control-plane count. Allowed values: 1 or 3."
+        exit 1
+    fi
+
+    echo ""
+    read -p "Number of worker nodes [default: 2, enter 1 or more]: " k8s_juju_worker_count_input
+    k8s_juju_worker_count="${k8s_juju_worker_count_input:-2}"
+    if ! [[ "$k8s_juju_worker_count" =~ ^[0-9]+$ ]] || (( k8s_juju_worker_count < 1 )); then
+        echo "Invalid worker count. It must be 1 or greater."
+        exit 1
+    fi
+
+    configure_k8s_sizing "$k8s_juju_cp_count" "$k8s_juju_worker_count"
+    K8S_JUJU_CP_CPU="$K8S_CONTROL_PLANE_CPU"
+    K8S_JUJU_CP_MEMORY_GIB="$K8S_CONTROL_PLANE_MEMORY_GIB"
+    K8S_JUJU_WORKER_CPU="$K8S_WORKER_CPU"
+    K8S_JUJU_WORKER_MEMORY_GIB="$K8S_WORKER_MEMORY_GIB"
+fi
+
 log_info "Setting up OpenTofu workspace: ${workspace_name}..."
 tofu workspace select "$workspace_name" 2>/dev/null || tofu workspace new "$workspace_name"
 
@@ -1282,6 +1497,17 @@ elif [[ "$scenario" == "microcloud" ]]; then
         -var="microcloud_ceph_disk_size_gib=${MICROCLOUD_CEPH_DISK_GIB}"
         -parallelism=1
     )
+elif [[ "$scenario" == "k8s-juju" ]]; then
+    tofu_apply_args+=(
+        -var="k8s_juju_cp_count=${k8s_juju_cp_count}"
+        -var="k8s_juju_worker_count=${k8s_juju_worker_count}"
+        -var="k8s_juju_cp_cpu=${K8S_JUJU_CP_CPU}"
+        -var="k8s_juju_cp_memory_gib=${K8S_JUJU_CP_MEMORY_GIB}"
+        -var="k8s_juju_worker_cpu=${K8S_JUJU_WORKER_CPU}"
+        -var="k8s_juju_worker_memory_gib=${K8S_JUJU_WORKER_MEMORY_GIB}"
+    )
+    log_info "K8s Juju topology: 1 Juju controller, ${k8s_juju_cp_count} control-plane node(s), ${k8s_juju_worker_count} worker node(s)"
+    log_info "K8s Juju sizing: cp=${K8S_JUJU_CP_CPU}vCPU/${K8S_JUJU_CP_MEMORY_GIB}GB, worker=${K8S_JUJU_WORKER_CPU}vCPU/${K8S_JUJU_WORKER_MEMORY_GIB}GB"
 fi
 
 tofu apply "${tofu_apply_args[@]}"
@@ -1300,4 +1526,14 @@ elif [[ "$scenario" == "microcloud" ]]; then
     print_microcloud_summary "$workspace_name"
     print_section "Access"
     print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
+fi
+
+if [[ "$scenario" == "k8s-juju" ]]; then
+    log_info "Running Ansible Orchestration for K8s (Juju)..."
+    ansible-playbook -i "$inventory_file" playbooks/k8s_juju.yml
+    log_success "K8s Juju Lab Deployed Successfully!"
+    print_k8s_juju_summary "$workspace_name"
+    print_section "Access"
+    print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
+    print_kv "Kubeconfig" "juju run k8s/leader get-kubeconfig -m lab-controller:k8s-lab"
 fi

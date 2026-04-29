@@ -108,6 +108,72 @@ variable "k8s_worker_memory_gib" {
   }
 }
 
+variable "k8s_juju_cp_count" {
+  description = "Number of Juju-based Kubernetes control-plane nodes"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = contains([1, 3], var.k8s_juju_cp_count)
+    error_message = "k8s_juju_cp_count must be 1 or 3."
+  }
+}
+
+variable "k8s_juju_worker_count" {
+  description = "Number of Juju-based Kubernetes worker nodes"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.k8s_juju_worker_count >= 1
+    error_message = "k8s_juju_worker_count must be 1 or greater."
+  }
+}
+
+variable "k8s_juju_cp_cpu" {
+  description = "vCPU count per Juju K8s control-plane node"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.k8s_juju_cp_cpu >= 1
+    error_message = "k8s_juju_cp_cpu must be 1 or greater."
+  }
+}
+
+variable "k8s_juju_cp_memory_gib" {
+  description = "Memory in GiB per Juju K8s control-plane node"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.k8s_juju_cp_memory_gib >= 1
+    error_message = "k8s_juju_cp_memory_gib must be 1 or greater."
+  }
+}
+
+variable "k8s_juju_worker_cpu" {
+  description = "vCPU count per Juju K8s worker node"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.k8s_juju_worker_cpu >= 1
+    error_message = "k8s_juju_worker_cpu must be 1 or greater."
+  }
+}
+
+variable "k8s_juju_worker_memory_gib" {
+  description = "Memory in GiB per Juju K8s worker node"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.k8s_juju_worker_memory_gib >= 1
+    error_message = "k8s_juju_worker_memory_gib must be 1 or greater."
+  }
+}
+
 variable "lxd_network_name" {
   description = "Primary LXD bridge network name used for VM eth0"
   type        = string
@@ -304,6 +370,70 @@ resource "lxd_instance" "k8s_worker_nodes" {
   }
 }
 
+# --- K8S JUJU NODES ---
+resource "lxd_instance" "k8s_juju_controller" {
+  count    = var.scenario == "k8s-juju" ? 1 : 0
+  name     = "${local.lxd_prefix}-juju-ctrl"
+  image    = var.ubuntu_image
+  type     = "virtual-machine"
+  profiles = [lxd_profile.lab_base.name]
+
+  limits = {
+    cpu    = "2"
+    memory = "4GiB"
+  }
+
+  config = {
+    "user.user-data" = <<-EOT
+      #cloud-config
+      ssh_authorized_keys:
+        - ${var.ssh_public_key}
+    EOT
+  }
+}
+
+resource "lxd_instance" "k8s_juju_cp_nodes" {
+  count    = var.scenario == "k8s-juju" ? var.k8s_juju_cp_count : 0
+  name     = "${local.lxd_prefix}-juju-cp-${count.index + 1}"
+  image    = var.ubuntu_image
+  type     = "virtual-machine"
+  profiles = [lxd_profile.lab_base.name]
+
+  limits = {
+    cpu    = tostring(var.k8s_juju_cp_cpu)
+    memory = "${var.k8s_juju_cp_memory_gib}GiB"
+  }
+
+  config = {
+    "user.user-data" = <<-EOT
+      #cloud-config
+      ssh_authorized_keys:
+        - ${var.ssh_public_key}
+    EOT
+  }
+}
+
+resource "lxd_instance" "k8s_juju_worker_nodes" {
+  count    = var.scenario == "k8s-juju" ? var.k8s_juju_worker_count : 0
+  name     = "${local.lxd_prefix}-juju-worker-${count.index + 1}"
+  image    = var.ubuntu_image
+  type     = "virtual-machine"
+  profiles = [lxd_profile.lab_base.name]
+
+  limits = {
+    cpu    = tostring(var.k8s_juju_worker_cpu)
+    memory = "${var.k8s_juju_worker_memory_gib}GiB"
+  }
+
+  config = {
+    "user.user-data" = <<-EOT
+      #cloud-config
+      ssh_authorized_keys:
+        - ${var.ssh_public_key}
+    EOT
+  }
+}
+
 # --- ANSIBLE INVENTORY GENERATION ---
 # Each environment creates its own inventory file to prevent conflicts
 resource "local_file" "ansible_inventory" {
@@ -324,6 +454,15 @@ resource "local_file" "ansible_inventory" {
         }
         k8s_workers = {
           hosts = { for name in lxd_instance.k8s_worker_nodes[*].name : name => { ansible_connection = "lxd" } }
+        }
+        k8s_juju_controller = {
+          hosts = { for name in lxd_instance.k8s_juju_controller[*].name : name => { ansible_connection = "lxd" } }
+        }
+        k8s_juju_cp = {
+          hosts = { for name in lxd_instance.k8s_juju_cp_nodes[*].name : name => { ansible_connection = "lxd" } }
+        }
+        k8s_juju_workers = {
+          hosts = { for name in lxd_instance.k8s_juju_worker_nodes[*].name : name => { ansible_connection = "lxd" } }
         }
       }
     }
