@@ -6,6 +6,20 @@
 # snap confinement/cgroup issues in LXD guest agent sessions.
 # ==============================================================================
 
+- name: Collect host UID for Juju SSH compatibility
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Read local host UID
+      command: id -u
+      register: local_uid_cmd
+      changed_when: false
+
+    - name: Store local host UID fact
+      set_fact:
+        juju_local_uid: "{{ local_uid_cmd.stdout | trim }}"
+
 - name: Wait for Juju nodes and gather facts
   hosts: k8s_juju_controller:k8s_juju_cp:k8s_juju_workers
   gather_facts: false
@@ -20,6 +34,21 @@
     - name: Wait for snapd seed
       command: snap wait system seed.loaded
       changed_when: false
+
+    - name: Check if local host UID exists on node
+      command: "getent passwd {{ hostvars['localhost']['juju_local_uid'] }}"
+      register: local_uid_entry
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure local host UID exists on node for Juju
+      user:
+        name: "jujuuid{{ hostvars['localhost']['juju_local_uid'] }}"
+        uid: "{{ hostvars['localhost']['juju_local_uid'] | int }}"
+        create_home: false
+        shell: "/usr/sbin/nologin"
+      become: true
+      when: local_uid_entry.rc != 0
 
 - name: Bootstrap Juju and deploy Canonical Kubernetes from host
   hosts: localhost
