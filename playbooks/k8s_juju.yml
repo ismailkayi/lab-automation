@@ -52,6 +52,11 @@
   hosts: k8s_juju_controller
   gather_facts: false
   vars:
+    juju_user: "ubuntu"
+    juju_home: "/home/ubuntu"
+    juju_env:
+      HOME: "/home/ubuntu"
+      XDG_DATA_HOME: "/home/ubuntu/.local/share"
     juju_model: "k8s-lab"
     juju_controller: "lab-controller"
   tasks:
@@ -64,19 +69,60 @@
       set_fact:
         ctrl_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
 
+    - name: Ensure Juju data directory exists for ubuntu
+      file:
+        path: "{{ juju_home }}/.local/share/juju"
+        state: directory
+        mode: "0755"
+        owner: "{{ juju_user }}"
+        group: "{{ juju_user }}"
+      become: true
+
+    - name: Ensure ubuntu SSH directory exists
+      file:
+        path: "{{ juju_home }}/.ssh"
+        state: directory
+        mode: "0700"
+        owner: "{{ juju_user }}"
+        group: "{{ juju_user }}"
+      become: true
+
+    - name: Ensure Juju SSH key exists for ubuntu
+      command: ssh-keygen -t ed25519 -N '' -f {{ juju_home }}/.ssh/id_ed25519
+      args:
+        creates: "{{ juju_home }}/.ssh/id_ed25519"
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
+
+    - name: Read Juju controller public key
+      slurp:
+        src: "{{ juju_home }}/.ssh/id_ed25519.pub"
+      register: juju_controller_pubkey_raw
+      become: true
+
+    - name: Store Juju controller public key fact
+      set_fact:
+        juju_controller_pubkey: "{{ juju_controller_pubkey_raw.content | b64decode | trim }}"
+
     - name: Check if Juju controller already bootstrapped
       command: juju controllers --format json
       register: juju_ctrl_check
       changed_when: false
       failed_when: false
-      become: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Add controller IP to known_hosts
       known_hosts:
         name: "{{ ctrl_ip }}"
         key: "{{ lookup('pipe', 'ssh-keyscan -H ' + ctrl_ip) }}"
         state: present
-      become: false
+        path: "{{ juju_home }}/.ssh/known_hosts"
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Bootstrap Juju manual cloud on controller VM
       command: >
@@ -86,7 +132,9 @@
       when: >
         juju_ctrl_check.rc != 0 or
         juju_controller not in (juju_ctrl_check.stdout | default(''))
-      become: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Add or reuse Juju model
       command: "juju add-model {{ juju_model }} {{ juju_controller }}"
@@ -95,7 +143,9 @@
         - add_model_result.rc != 0
         - "'already exists' not in (add_model_result.stderr | default(''))"
       changed_when: add_model_result.rc == 0
-      become: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     # --- Add K8s control-plane nodes as Juju machines ---
     - name: Add K8s CP nodes to known_hosts
@@ -103,8 +153,11 @@
         name: "{{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}"
         key: "{{ lookup('pipe', 'ssh-keyscan -H ' + hostvars[item]['ansible_facts']['default_ipv4']['address']) }}"
         state: present
+        path: "{{ juju_home }}/.ssh/known_hosts"
       loop: "{{ groups['k8s_juju_cp'] }}"
-      become: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Add K8s CP nodes as Juju machines
       command: >
@@ -117,7 +170,9 @@
         - add_cp_machines.rc != 0
         - "'already' not in (add_cp_machines.stderr | default(''))"
       changed_when: add_cp_machines.rc == 0
-      become: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     # --- Add K8s worker nodes as Juju machines ---
     - name: Add K8s worker nodes to known_hosts
@@ -125,8 +180,11 @@
         name: "{{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}"
         key: "{{ lookup('pipe', 'ssh-keyscan -H ' + hostvars[item]['ansible_facts']['default_ipv4']['address']) }}"
         state: present
+        path: "{{ juju_home }}/.ssh/known_hosts"
       loop: "{{ groups['k8s_juju_workers'] }}"
-      become: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Add K8s worker nodes as Juju machines
       command: >
@@ -139,12 +197,32 @@
         - add_worker_machines.rc != 0
         - "'already' not in (add_worker_machines.stderr | default(''))"
       changed_when: add_worker_machines.rc == 0
-      become: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
+
+- name: Trust Juju controller SSH key on all Juju nodes
+  hosts: k8s_juju_controller:k8s_juju_cp:k8s_juju_workers
+  gather_facts: false
+  vars:
+    juju_controller_host: "{{ groups['k8s_juju_controller'][0] }}"
+  tasks:
+    - name: Authorize controller Juju key for ubuntu
+      authorized_key:
+        user: ubuntu
+        key: "{{ hostvars[juju_controller_host]['juju_controller_pubkey'] }}"
+        state: present
+      become: true
 
 - name: Deploy Canonical Kubernetes charm bundle
   hosts: k8s_juju_controller
   gather_facts: false
   vars:
+    juju_user: "ubuntu"
+    juju_home: "/home/ubuntu"
+    juju_env:
+      HOME: "/home/ubuntu"
+      XDG_DATA_HOME: "/home/ubuntu/.local/share"
     juju_controller: "lab-controller"
     juju_model: "k8s-lab"
     cp_count: "{{ groups['k8s_juju_cp'] | length }}"
@@ -157,6 +235,9 @@
       register: juju_status
       changed_when: false
       failed_when: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Deploy canonical-kubernetes bundle
       command: >
@@ -168,6 +249,9 @@
         juju_status.rc != 0 or
         'k8s' not in (juju_status.stdout | default(''))
       changed_when: true
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Wait for Juju deployment to settle
       command: >
@@ -175,6 +259,9 @@
         -m {{ juju_controller }}:{{ juju_model }}
         --timeout 30m
       changed_when: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Show final Juju status
       command: >
@@ -183,6 +270,9 @@
         --color
       register: final_juju_status
       changed_when: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Print Juju status
       debug:
@@ -196,6 +286,9 @@
       register: kubeconfig_out
       changed_when: false
       failed_when: false
+      become: true
+      become_user: "{{ juju_user }}"
+      environment: "{{ juju_env }}"
 
     - name: Print kubeconfig hint
       debug:
