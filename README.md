@@ -5,6 +5,7 @@ Canonical Lab Automation creates local Canonical labs on top of LXD virtual mach
 Supported scenarios:
 
 - Canonical Kubernetes (Snap)
+- Canonical Kubernetes (Juju)
 - MicroCloud
 
 ## Download
@@ -77,7 +78,8 @@ You will then choose one of these options:
 ```text
 1) Deploy Canonical K8s (Snap)
 2) Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)
-3) Destroy Environments
+3) Deploy Canonical K8s (Juju)
+4) Destroy Environments
 ```
 
 ## Visual Walkthrough
@@ -98,6 +100,7 @@ mylab
 The script converts it into a workspace name automatically:
 
 - Kubernetes: `mylab_k8s-snap`
+- Kubernetes (Juju): `mylab_k8s-juju`
 - MicroCloud: `mylab_microcloud`
 
 If you enter the full workspace name by mistake, the script normalizes it automatically.
@@ -154,6 +157,58 @@ Important:
 - shrinking in place is not supported
 - to reduce node count, use `rebuild`
 
+## Deploying Canonical Kubernetes (Juju)
+
+The Juju-based scenario creates a dedicated Juju controller VM and deploys Canonical Kubernetes on separate control-plane and worker VMs.
+
+Canonical Kubernetes (Juju) supports:
+
+- `1` or `3` control-plane nodes
+- `1` or more worker nodes
+
+Default values:
+
+- `1` control-plane node
+- `1` worker node
+
+Prompts:
+
+```text
+Number of control-plane nodes [default: 1, allowed: 1 or 3]:
+Number of worker nodes [default: 1, enter 1 or more]:
+```
+
+### Kubernetes (Juju) Sizing
+
+The Juju scenario uses the same sizing advisor as the snap-based Kubernetes flow.
+
+- Profiles: `balanced` (default), `conservative`, `performance`, `custom`
+- Control-plane and worker nodes are sized separately
+- `custom` lets you enter per-node vCPU and memory (GB)
+
+At the end of a successful deployment, the script prints:
+
+- Juju controller VM name and IP
+- control-plane and worker nodes
+- a kubeconfig retrieval command
+
+### Existing Kubernetes (Juju) Lab
+
+When you select an existing Juju lab, the script shows the current topology and offers these actions:
+
+- `update in place`: add nodes or re-run reconciliation on the existing lab
+- `rebuild`: destroy and recreate the lab from scratch
+- `delete`: remove the lab and exit
+- `cancel`: stop the operation
+
+Important:
+
+- growing is supported in place
+- shrinking in place is not supported
+- to reduce node count, use `rebuild`
+- during in-place updates, existing node sizing is preserved
+- new Juju machines are reconciled into the cluster automatically
+
 ## Deploying MicroCloud
 
 MicroCloud currently uses a fixed topology:
@@ -187,12 +242,20 @@ Deployment status example:
 
 ![MicroCloud status](docs/images/microcloud-status.png)
 
+### Existing MicroCloud Lab
+
+When you select an existing MicroCloud lab, the script offers:
+
+- `rebuild`: destroy and recreate the lab from scratch
+- `delete`: remove the lab and exit
+- `cancel`: stop the operation
+
 ## Destroying an Environment
 
 Choose:
 
 ```text
-3) Destroy Environments
+4) Destroy Environments
 ```
 
 Then:
@@ -235,9 +298,25 @@ ssh -i ~/.ssh/id_rsa_lab ubuntu@<VM_IP>
 2. Choose `Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)`
 3. Enter a lab prefix
 
+### New Kubernetes (Juju) Lab
+
+1. Run `./orchestrate.sh`
+2. Choose `Deploy Canonical K8s (Juju)`
+3. Enter a lab prefix such as `demo`
+4. Accept defaults or choose your topology
+
+### Expand an Existing Kubernetes (Juju) Lab
+
+1. Run `./orchestrate.sh`
+2. Choose `Deploy Canonical K8s (Juju)`
+3. Select the existing lab
+4. Choose `update in place`
+5. Increase control-plane or worker count
+
 ## Notes
 
 - Kubernetes re-runs are designed to be safe and idempotent
+- Kubernetes (Juju) re-runs can reconcile newly added Juju machines into the cluster
 - MicroCloud re-runs are intended for verification and reconciliation of a healthy cluster
 - MicroCloud Terraform apply runs serially to reduce provider race issues during volume creation
 
@@ -247,7 +326,9 @@ ssh -i ~/.ssh/id_rsa_lab ubuntu@<VM_IP>
 
 Use the same lab name again.
 
-For Kubernetes, the script will guide you through `add`, `rebuild`, or `cancel`.
+For Kubernetes (Snap), the script will guide you through `add`, `rebuild`, or `cancel`.
+
+For Kubernetes (Juju), the script will guide you through `update in place`, `rebuild`, `delete`, or `cancel`.
 
 ### I want fewer Kubernetes nodes than I have now
 
