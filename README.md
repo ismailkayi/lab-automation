@@ -4,9 +4,26 @@ Canonical Lab Automation creates local Canonical labs on top of LXD virtual mach
 
 Supported scenarios:
 
+- MicroCloud
 - Canonical Kubernetes (Snap)
 - Canonical Kubernetes (Juju)
-- MicroCloud
+
+## Table of Contents
+
+- [Download](#download)
+- [Before You Start](#before-you-start)
+- [Quick Start](#quick-start)
+- [Visual Walkthrough](#visual-walkthrough)
+- [How Naming Works](#how-naming-works)
+- [Deploying MicroCloud](#deploying-microcloud)
+- [Deploying Canonical Kubernetes](#deploying-canonical-kubernetes)
+- [Deploying Canonical Kubernetes (Juju)](#deploying-canonical-kubernetes-juju)
+- [Destroying an Environment](#destroying-an-environment)
+- [SSH Access](#ssh-access)
+- [Typical Usage Examples](#typical-usage-examples)
+- [Notes](#notes)
+- [Troubleshooting](#troubleshooting)
+- [Summary](#summary)
 
 ## Download
 
@@ -104,6 +121,47 @@ The script converts it into a workspace name automatically:
 - MicroCloud: `mylab_microcloud`
 
 If you enter the full workspace name by mistake, the script normalizes it automatically.
+
+## Deploying MicroCloud
+
+MicroCloud currently uses a fixed topology:
+
+- `3` nodes
+- MicroCeph enabled
+- MicroOVN enabled
+
+### MicroCloud Sizing Profiles
+
+During MicroCloud deployment, the script scans host resources and suggests per-node sizing for the fixed 3-node cluster.
+
+- `balanced`: default profile
+- `conservative`: smaller than balanced
+- `performance`: larger than balanced
+- `custom`: you enter per-node values manually
+
+For `custom`, values are entered as per-node `vCPU`, `memory (GB)`, `root disk (GB)`, and `ceph disk (GB)`.
+
+Sizing advisor example:
+
+![MicroCloud sizing advisor](docs/images/microcloud-sizing.png)
+
+At the end of a successful deployment, the script prints:
+
+- cluster health
+- cluster nodes
+- UI access links on port `8443`
+
+Deployment status example:
+
+![MicroCloud status](docs/images/microcloud-status.png)
+
+### Existing MicroCloud Lab
+
+When you select an existing MicroCloud lab, the script offers:
+
+- `rebuild`: destroy and recreate the lab from scratch
+- `delete`: remove the lab and exit
+- `cancel`: stop the operation
 
 ## Deploying Canonical Kubernetes
 
@@ -209,47 +267,6 @@ Important:
 - during in-place updates, existing node sizing is preserved
 - new Juju machines are reconciled into the cluster automatically
 
-## Deploying MicroCloud
-
-MicroCloud currently uses a fixed topology:
-
-- `3` nodes
-- MicroCeph enabled
-- MicroOVN enabled
-
-### MicroCloud Sizing Profiles
-
-During MicroCloud deployment, the script scans host resources and suggests per-node sizing for the fixed 3-node cluster.
-
-- `balanced`: default profile
-- `conservative`: smaller than balanced
-- `performance`: larger than balanced
-- `custom`: you enter per-node values manually
-
-For `custom`, values are entered as per-node `vCPU`, `memory (GB)`, `root disk (GB)`, and `ceph disk (GB)`.
-
-Sizing advisor example:
-
-![MicroCloud sizing advisor](docs/images/microcloud-sizing.png)
-
-At the end of a successful deployment, the script prints:
-
-- cluster health
-- cluster nodes
-- UI access links on port `8443`
-
-Deployment status example:
-
-![MicroCloud status](docs/images/microcloud-status.png)
-
-### Existing MicroCloud Lab
-
-When you select an existing MicroCloud lab, the script offers:
-
-- `rebuild`: destroy and recreate the lab from scratch
-- `delete`: remove the lab and exit
-- `cancel`: stop the operation
-
 ## Destroying an Environment
 
 Choose:
@@ -277,6 +294,12 @@ ssh -i ~/.ssh/id_rsa_lab ubuntu@<VM_IP>
 
 ## Typical Usage Examples
 
+### New MicroCloud Lab
+
+1. Run `./orchestrate.sh`
+2. Choose `Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)`
+3. Enter a lab prefix
+
 ### New Kubernetes Lab
 
 1. Run `./orchestrate.sh`
@@ -291,12 +314,6 @@ ssh -i ~/.ssh/id_rsa_lab ubuntu@<VM_IP>
 3. Enter the same lab prefix as before
 4. Choose `add`
 5. Increase control-plane or worker-only count
-
-### New MicroCloud Lab
-
-1. Run `./orchestrate.sh`
-2. Choose `Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)`
-3. Enter a lab prefix
 
 ### New Kubernetes (Juju) Lab
 
