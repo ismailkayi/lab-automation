@@ -122,7 +122,7 @@ variable "k8s_juju_cp_count" {
 variable "k8s_juju_worker_count" {
   description = "Number of Juju-based Kubernetes worker nodes"
   type        = number
-  default     = 2
+  default     = 1
 
   validation {
     condition     = var.k8s_juju_worker_count >= 1
@@ -373,7 +373,7 @@ resource "lxd_instance" "k8s_worker_nodes" {
 # --- K8S JUJU NODES ---
 resource "lxd_instance" "k8s_juju_controller" {
   count    = var.scenario == "k8s-juju" ? 1 : 0
-  name     = "${local.lxd_prefix}-juju-ctrl"
+  name     = "${local.lxd_prefix}-ctrl"
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
@@ -394,7 +394,7 @@ resource "lxd_instance" "k8s_juju_controller" {
 
 resource "lxd_instance" "k8s_juju_cp_nodes" {
   count    = var.scenario == "k8s-juju" ? var.k8s_juju_cp_count : 0
-  name     = "${local.lxd_prefix}-juju-cp-${count.index + 1}"
+  name     = "${local.lxd_prefix}-cp-${count.index + 1}"
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]
@@ -415,7 +415,7 @@ resource "lxd_instance" "k8s_juju_cp_nodes" {
 
 resource "lxd_instance" "k8s_juju_worker_nodes" {
   count    = var.scenario == "k8s-juju" ? var.k8s_juju_worker_count : 0
-  name     = "${local.lxd_prefix}-juju-worker-${count.index + 1}"
+  name     = "${local.lxd_prefix}-worker-${count.index + 1}"
   image    = var.ubuntu_image
   type     = "virtual-machine"
   profiles = [lxd_profile.lab_base.name]

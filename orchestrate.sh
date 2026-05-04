@@ -1033,12 +1033,12 @@ print_k8s_summary() {
 print_k8s_juju_summary() {
     local ws_name="$1"
     local lxd_prefix="${ws_name//_/-}"
-    local ctrl_node="${lxd_prefix}-juju-ctrl"
+    local ctrl_node="${lxd_prefix}-ctrl"
     local first_cp=""
     local api_ip=""
 
-    mapfile -t cp_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-juju-cp-" || true)
-    mapfile -t worker_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-juju-worker-" || true)
+    mapfile -t cp_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-cp-" || true)
+    mapfile -t worker_nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-worker-" || true)
 
     print_section "K8s Juju Deployment Summary"
     print_kv "Juju controller VM" "$ctrl_node"
@@ -1232,12 +1232,13 @@ esac
 
 # --- Resolve workspace ---
 k8s_update_action="new"
+k8s_juju_update_action="new"
 current_k8s_cp_count=0
 current_k8s_worker_count=0
 k8s_control_plane_count=3
 k8s_worker_count=1
 k8s_juju_cp_count=1
-k8s_juju_worker_count=2
+k8s_juju_worker_count=1
 K8S_JUJU_CP_CPU=2
 K8S_JUJU_CP_MEMORY_GIB=4
 K8S_JUJU_WORKER_CPU=2
@@ -1318,11 +1319,47 @@ else
                 exit 1
                 ;;
         esac
+    elif [[ "$scenario" == "k8s-juju" ]]; then
+        read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_juju_topology_from_state "$workspace_name")
+        print_section "Managing: ${user_prefix} (K8s Juju)"
+        print_kv "Current topology" "${current_k8s_cp_count} CP / ${current_k8s_worker_count} worker"
+        echo ""
+        echo "  1) Update in place (expand/reconcile)"
+        echo "  2) Rebuild  (destroy and redeploy from scratch)"
+        echo "  3) Delete lab and exit"
+        echo "  0) Cancel"
+        echo ""
+        read -p "Select: " juju_manage_action
+        case "$juju_manage_action" in
+            1|"")
+                k8s_juju_update_action="add"
+                log_info "Update mode: reconcile/expand existing K8s Juju lab."
+                ;;
+            2)
+                k8s_juju_update_action="rebuild"
+                log_warn "Rebuilding K8s Juju lab: ${workspace_name}"
+                destroy_environment "$workspace_name" "$user_prefix" "$scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
+                existing_workspace=false
+                ;;
+            3)
+                log_warn "Deleting K8s Juju lab: ${workspace_name}"
+                destroy_environment "$workspace_name" "$user_prefix" "$scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
+                log_success "K8s Juju lab deleted."
+                exit 0
+                ;;
+            0)
+                echo "Cancelled."; exit 0
+                ;;
+            *)
+                echo "Invalid selection."; exit 1
+                ;;
+        esac
     else
         # MicroCloud manage menu
         print_section "Managing: ${user_prefix} (MicroCloud)"
         echo ""
         echo "  1) Rebuild  (destroy and redeploy from scratch)"
+        echo "  2) Delete lab and exit"
         echo "  0) Cancel"
         echo ""
         read -p "Select: " mc_manage_action
@@ -1332,29 +1369,11 @@ else
                 destroy_environment "$workspace_name" "$user_prefix" "$scenario"
                 existing_workspace=false
                 ;;
-            0|"")
-                echo "Cancelled."; exit 0
-                ;;
-            *)
-                echo "Invalid selection."; exit 1
-                ;;
-        esac
-    fi
-
-    if [[ "$scenario" == "k8s-juju" ]]; then
-        read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_juju_topology_from_state "$workspace_name")
-        print_section "Managing: ${user_prefix} (K8s Juju)"
-        print_kv "Current topology" "${current_k8s_cp_count} CP / ${current_k8s_worker_count} worker"
-        echo ""
-        echo "  1) Rebuild  (destroy and redeploy from scratch)"
-        echo "  0) Cancel"
-        echo ""
-        read -p "Select: " juju_manage_action
-        case "$juju_manage_action" in
-            1)
-                log_warn "Rebuilding K8s Juju lab: ${workspace_name}"
-                destroy_environment "$workspace_name" "$user_prefix" "$scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
-                existing_workspace=false
+            2)
+                log_warn "Deleting MicroCloud lab: ${workspace_name}"
+                destroy_environment "$workspace_name" "$user_prefix" "$scenario"
+                log_success "MicroCloud lab deleted."
+                exit 0
                 ;;
             0|"")
                 echo "Cancelled."; exit 0
@@ -1439,27 +1458,67 @@ if [[ "$scenario" == "microcloud" ]]; then
 fi
 
 if [[ "$scenario" == "k8s-juju" ]]; then
-    echo ""
-    read -p "Number of control-plane nodes [default: 1, allowed: 1 or 3]: " k8s_juju_cp_count_input
-    k8s_juju_cp_count="${k8s_juju_cp_count_input:-1}"
+    if [[ "$existing_workspace" == true && "$k8s_juju_update_action" == "add" ]]; then
+        echo ""
+        read -p "Target control-plane nodes [default: ${current_k8s_cp_count}, allowed: 1 or 3, must be >= current]: " k8s_juju_cp_count_input
+        k8s_juju_cp_count="${k8s_juju_cp_count_input:-$current_k8s_cp_count}"
+    else
+        echo ""
+        read -p "Number of control-plane nodes [default: 1, allowed: 1 or 3]: " k8s_juju_cp_count_input
+        k8s_juju_cp_count="${k8s_juju_cp_count_input:-1}"
+    fi
+
     if [[ "$k8s_juju_cp_count" != "1" && "$k8s_juju_cp_count" != "3" ]]; then
         echo "Invalid control-plane count. Allowed values: 1 or 3."
         exit 1
     fi
 
-    echo ""
-    read -p "Number of worker nodes [default: 2, enter 1 or more]: " k8s_juju_worker_count_input
-    k8s_juju_worker_count="${k8s_juju_worker_count_input:-2}"
+    if [[ "$existing_workspace" == true && "$k8s_juju_update_action" == "add" ]] && (( k8s_juju_cp_count < current_k8s_cp_count )); then
+        echo "Shrinking control-plane nodes in update mode is not supported. Choose rebuild to shrink."
+        exit 1
+    fi
+
+    if [[ "$existing_workspace" == true && "$k8s_juju_update_action" == "add" ]]; then
+        echo ""
+        read -p "Target worker nodes [default: ${current_k8s_worker_count}, enter 1 or more, must be >= current]: " k8s_juju_worker_count_input
+        k8s_juju_worker_count="${k8s_juju_worker_count_input:-$current_k8s_worker_count}"
+    else
+        echo ""
+        read -p "Number of worker nodes [default: 1, enter 1 or more]: " k8s_juju_worker_count_input
+        k8s_juju_worker_count="${k8s_juju_worker_count_input:-1}"
+    fi
+
     if ! [[ "$k8s_juju_worker_count" =~ ^[0-9]+$ ]] || (( k8s_juju_worker_count < 1 )); then
         echo "Invalid worker count. It must be 1 or greater."
         exit 1
     fi
 
-    configure_k8s_sizing "$k8s_juju_cp_count" "$k8s_juju_worker_count"
-    K8S_JUJU_CP_CPU="$K8S_CONTROL_PLANE_CPU"
-    K8S_JUJU_CP_MEMORY_GIB="$K8S_CONTROL_PLANE_MEMORY_GIB"
-    K8S_JUJU_WORKER_CPU="$K8S_WORKER_CPU"
-    K8S_JUJU_WORKER_MEMORY_GIB="$K8S_WORKER_MEMORY_GIB"
+    if [[ "$existing_workspace" == true && "$k8s_juju_update_action" == "add" ]] && (( k8s_juju_worker_count < current_k8s_worker_count )); then
+        echo "Shrinking worker nodes in update mode is not supported. Choose rebuild to shrink."
+        exit 1
+    fi
+
+    if [[ "$existing_workspace" == true && "$k8s_juju_update_action" == "add" ]]; then
+        if [[ "$k8s_juju_cp_count" == "$current_k8s_cp_count" && "$k8s_juju_worker_count" == "$current_k8s_worker_count" ]]; then
+            log_info "Topology is unchanged. The existing K8s Juju lab will be reconciled in place."
+        else
+            log_info "The existing K8s Juju lab will be expanded in place."
+        fi
+
+        read -r K8S_JUJU_CP_CPU K8S_JUJU_CP_MEMORY_GIB K8S_JUJU_WORKER_CPU K8S_JUJU_WORKER_MEMORY_GIB < <(
+            get_k8s_sizing_from_state "$workspace_name"
+        )
+        print_section "K8s Juju Sizing (preserved from existing nodes)"
+        print_kv "Control-plane" "${K8S_JUJU_CP_CPU} vCPU / ${K8S_JUJU_CP_MEMORY_GIB} GB"
+        print_kv "Worker" "${K8S_JUJU_WORKER_CPU} vCPU / ${K8S_JUJU_WORKER_MEMORY_GIB} GB"
+        print_kv "Note" "New nodes will be created with the same sizing as existing nodes"
+    else
+        configure_k8s_sizing "$k8s_juju_cp_count" "$k8s_juju_worker_count"
+        K8S_JUJU_CP_CPU="$K8S_CONTROL_PLANE_CPU"
+        K8S_JUJU_CP_MEMORY_GIB="$K8S_CONTROL_PLANE_MEMORY_GIB"
+        K8S_JUJU_WORKER_CPU="$K8S_WORKER_CPU"
+        K8S_JUJU_WORKER_MEMORY_GIB="$K8S_WORKER_MEMORY_GIB"
+    fi
 fi
 
 log_info "Setting up OpenTofu workspace: ${workspace_name}..."
@@ -1535,5 +1594,5 @@ if [[ "$scenario" == "k8s-juju" ]]; then
     print_k8s_juju_summary "$workspace_name"
     print_section "Access"
     print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
-    print_kv "Kubeconfig" "lxc exec <prefix>-juju-ctrl -- sudo -u ubuntu -H juju run k8s/leader get-kubeconfig -m lab-controller:k8s-lab"
+    print_kv "Kubeconfig" "lxc exec <prefix>-ctrl -- sudo -u ubuntu -H juju run k8s/leader get-kubeconfig -m lab-controller:k8s-lab"
 fi

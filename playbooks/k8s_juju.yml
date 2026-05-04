@@ -72,6 +72,16 @@
       set_fact:
         juju_controller_pubkey: "{{ juju_controller_pubkey_raw.content | b64decode | trim }}"
 
+    - name: Add all Juju node IPs to controller known_hosts
+      known_hosts:
+        name: "{{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan ' + hostvars[item]['ansible_facts']['default_ipv4']['address']) }}"
+        path: "{{ juju_home }}/.ssh/known_hosts"
+        state: present
+      loop: "{{ groups['k8s_juju_controller'] + groups['k8s_juju_cp'] + groups['k8s_juju_workers'] }}"
+      become: true
+      become_user: "{{ juju_user }}"
+
 - name: Trust controller Juju key on all Juju nodes
   hosts: k8s_juju_controller:k8s_juju_cp:k8s_juju_workers
   gather_facts: false
@@ -94,20 +104,24 @@
     juju_controller: "lab-controller"
     juju_controller_host: "{{ groups['k8s_juju_controller'][0] }}"
     juju_controller_ip: "{{ hostvars[juju_controller_host]['ansible_facts']['default_ipv4']['address'] }}"
-    juju_machine_hosts: "{{ (groups['k8s_juju_cp'] | default([])) + (groups['k8s_juju_workers'] | default([])) }}"
+    juju_cp_hosts: "{{ groups['k8s_juju_cp'] | default([]) }}"
+    juju_worker_hosts: "{{ groups['k8s_juju_workers'] | default([]) }}"
+    juju_machine_hosts: "{{ juju_cp_hosts + juju_worker_hosts }}"
   tasks:
     - name: Check if Juju controller already bootstrapped
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju controllers --format json
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju controllers --format json
       register: juju_ctrl_check
       changed_when: false
       failed_when: false
 
     - name: Bootstrap Juju manual cloud on controller VM
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju bootstrap
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju bootstrap
         manual/ubuntu@{{ juju_controller_ip }}
         {{ juju_controller }}
       when: >
@@ -116,27 +130,20 @@
 
     - name: Add or reuse Juju model
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju add-model {{ juju_model }} {{ juju_controller }}
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju add-model {{ juju_model }} --controller {{ juju_controller }}
       register: add_model_result
       failed_when:
         - add_model_result.rc != 0
         - "'already exists' not in (add_model_result.stderr | default(''))"
       changed_when: add_model_result.rc == 0
 
-    - name: Ensure controller known_hosts has all target node IPs
-      command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H bash -lc
-        "ssh-keyscan -H {{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }} >> ~/.ssh/known_hosts"
-      loop: "{{ [juju_controller_host] + juju_machine_hosts }}"
-      changed_when: false
-      failed_when: false
-
     - name: Add Juju machines for Kubernetes nodes
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju add-machine
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju add-machine
         -m {{ juju_controller }}:{{ juju_model }}
         ssh:ubuntu@{{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}
       loop: "{{ juju_machine_hosts }}"
@@ -148,40 +155,173 @@
 
     - name: Check if k8s application is already deployed
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju status -m {{ juju_controller }}:{{ juju_model }}
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju status -m {{ juju_controller }}:{{ juju_model }}
         --format json
       register: juju_status
       changed_when: false
       failed_when: false
 
+    - name: Parse Juju applications from status JSON
+      set_fact:
+        juju_status_json: "{{ (juju_status.stdout | default('{}')) | from_json }}"
+        juju_applications: "{{ ((juju_status.stdout | default('{}')) | from_json).applications | default({}) }}"
+
+    - name: Parse Juju machines from status JSON
+      set_fact:
+        juju_machines: "{{ juju_status_json.machines | default({}) }}"
+
+    - name: Determine whether bundle deploy is required
+      set_fact:
+        juju_bundle_deploy_required: "{{ 'k8s' not in juju_applications and 'canonical-kubernetes' not in juju_applications }}"
+
+    - name: Map control-plane hosts to Juju machine ids
+      set_fact:
+        juju_cp_machine_ids: "{{ (juju_cp_machine_ids | default([])) + [juju_machine_id] }}"
+      vars:
+        juju_machine_id: >-
+          {{
+            (
+              juju_machines
+              | dict2items
+              | selectattr('value.hostname', 'defined')
+              | selectattr('value.hostname', 'equalto', item)
+              | map(attribute='key')
+              | list
+              | first
+            ) | default('')
+          }}
+      loop: "{{ juju_cp_hosts }}"
+      failed_when: juju_machine_id == ''
+
+    - name: Map worker hosts to Juju machine ids
+      set_fact:
+        juju_worker_machine_ids: "{{ (juju_worker_machine_ids | default([])) + [juju_machine_id] }}"
+      vars:
+        juju_machine_id: >-
+          {{
+            (
+              juju_machines
+              | dict2items
+              | selectattr('value.hostname', 'defined')
+              | selectattr('value.hostname', 'equalto', item)
+              | map(attribute='key')
+              | list
+              | first
+            ) | default('')
+          }}
+      loop: "{{ juju_worker_hosts }}"
+      failed_when: juju_machine_id == ''
+
+    - name: Collect currently assigned control-plane machine ids
+      set_fact:
+        juju_k8s_machine_ids: >-
+          {{
+            juju_applications.get('k8s', {}).get('units', {})
+            | dict2items
+            | map(attribute='value.machine')
+            | list
+          }}
+
+    - name: Collect currently assigned worker machine ids
+      set_fact:
+        juju_k8s_worker_machine_ids: >-
+          {{
+            juju_applications.get('k8s-worker', {}).get('units', {})
+            | dict2items
+            | map(attribute='value.machine')
+            | list
+          }}
+
+    - name: Determine missing control-plane placements
+      set_fact:
+        juju_cp_machine_ids_to_add: "{{ juju_cp_machine_ids | reject('in', juju_k8s_machine_ids | default([])) | list }}"
+
+    - name: Determine missing worker placements
+      set_fact:
+        juju_worker_machine_ids_to_add: "{{ juju_worker_machine_ids | reject('in', juju_k8s_worker_machine_ids | default([])) | list }}"
+
+    - name: Build bundle overlay on controller for manual machine mapping
+      shell: |
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes ubuntu@{{ juju_controller_ip }} "cat > /home/ubuntu/k8s-bundle-overlay.yaml <<'EOF'
+        machines:
+        {% for i in range(0, juju_cp_hosts | length + juju_worker_hosts | length) %}
+          \"{{ i }}\": {}
+        {% endfor %}
+        applications:
+          k8s:
+            num_units: {{ juju_cp_hosts | length }}
+            constraints: \"\"
+            to:
+        {% for i in range(0, juju_cp_hosts | length) %}
+              - \"{{ i }}\"
+        {% endfor %}
+          k8s-worker:
+            num_units: {{ juju_worker_hosts | length }}
+            constraints: \"\"
+            to:
+        {% for i in range(juju_cp_hosts | length, juju_cp_hosts | length + juju_worker_hosts | length) %}
+              - \"{{ i }}\"
+        {% endfor %}
+        EOF"
+      changed_when: false
+
     - name: Deploy canonical-kubernetes bundle
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju deploy canonical-kubernetes
-        -m {{ juju_controller }}:{{ juju_model }}
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju deploy canonical-kubernetes
+        --channel 1.32/stable
+        --trust
         --map-machines existing
-        --num-units {{ juju_machine_hosts | length }}
-      when: >
-        juju_status.rc != 0 or
-        (
-          '"k8s"' not in (juju_status.stdout | default('')) and
-          '"canonical-kubernetes"' not in (juju_status.stdout | default(''))
-        )
+        --overlay /home/ubuntu/k8s-bundle-overlay.yaml
+        -m {{ juju_controller }}:{{ juju_model }}
+      when: juju_bundle_deploy_required
       changed_when: true
 
-    - name: Wait for Juju deployment to settle
+    - name: Add missing control-plane units to existing deployment
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju status
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju add-unit k8s
         -m {{ juju_controller }}:{{ juju_model }}
-        --wait=30m
+        --to {{ item }}
+      loop: "{{ juju_cp_machine_ids_to_add }}"
+      when:
+        - not juju_bundle_deploy_required
+        - "'k8s' in juju_applications"
+        - (juju_cp_machine_ids_to_add | length) > 0
+      changed_when: true
+
+    - name: Add missing worker units to existing deployment
+      command: >
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju add-unit k8s-worker
+        -m {{ juju_controller }}:{{ juju_model }}
+        --to {{ item }}
+      loop: "{{ juju_worker_machine_ids_to_add }}"
+      when:
+        - not juju_bundle_deploy_required
+        - "'k8s-worker' in juju_applications"
+        - (juju_worker_machine_ids_to_add | length) > 0
+      changed_when: true
+
+    - name: Wait for Kubernetes application to become active
+      shell: >
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        "juju wait-for application k8s -m {{ juju_controller }}:{{ juju_model }} --timeout 30m
+        && juju wait-for application k8s-worker -m {{ juju_controller }}:{{ juju_model }} --timeout 30m
+        || juju wait-for application canonical-kubernetes -m {{ juju_controller }}:{{ juju_model }} --timeout 30m"
       changed_when: false
 
     - name: Show final Juju status
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju status
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju status
         -m {{ juju_controller }}:{{ juju_model }}
         --color
       register: final_juju_status
@@ -193,8 +333,9 @@
 
     - name: Fetch kubeconfig from k8s/leader
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju run k8s/leader get-kubeconfig
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju run k8s/leader get-kubeconfig
         -m {{ juju_controller }}:{{ juju_model }}
         --format plain
       register: kubeconfig_out
@@ -203,8 +344,9 @@
 
     - name: Fetch kubeconfig from canonical-kubernetes/leader (fallback)
       command: >
-        lxc exec {{ juju_controller_host }} --
-        sudo -u ubuntu -H juju run canonical-kubernetes/leader get-kubeconfig
+        ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+        ubuntu@{{ juju_controller_ip }}
+        juju run canonical-kubernetes/leader get-kubeconfig
         -m {{ juju_controller }}:{{ juju_model }}
         --format plain
       register: kubeconfig_out_fallback
