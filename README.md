@@ -129,6 +129,7 @@ MicroCloud has two deploy options in the menu:
 
 - `Deploy MicroCloud`: existing flow, includes package installation and automated cluster bootstrap
 - `Deploy MicroCloud Infra-Only`: creates the same 3-node VM/network/disk infrastructure, but does not install MicroCloud packages or initialize the cluster
+	- each node also gets an extra small local storage disk for student exercises (for example local ZFS tests)
 
 MicroCloud currently uses a fixed topology:
 

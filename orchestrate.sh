@@ -21,6 +21,7 @@ MICROCLOUD_NODE_CPU="2"
 MICROCLOUD_NODE_MEMORY_MB="4096"
 MICROCLOUD_ROOT_DISK_GIB="40"
 MICROCLOUD_CEPH_DISK_GIB="50"
+MICROCLOUD_LOCAL_DISK_GIB="20"
 MICROCLOUD_DEPLOY_MODE="full"
 K8S_CONTROL_PLANE_CPU="2"
 K8S_CONTROL_PLANE_MEMORY_GIB="4"
@@ -834,8 +835,15 @@ destroy_environment() {
         cleanup_microcloud_orphans "$env_name"
     fi
 
-    tofu workspace select default >/dev/null 2>&1
-    tofu workspace delete "$env_name" >/dev/null 2>&1
+    if ! tofu workspace select default >/dev/null 2>&1; then
+        log_warn "Could not switch to default workspace before deleting ${env_name}."
+        return
+    fi
+
+    if ! tofu workspace delete -force "$env_name" >/dev/null 2>&1; then
+        log_warn "Could not delete workspace ${env_name}. It may still contain state entries."
+    fi
+
     rm -f "inventory_${env_name}.yaml"
 }
 
@@ -851,7 +859,7 @@ cleanup_microcloud_orphans() {
 
     uplink_hash=$(printf '%s' "$lxd_prefix" | md5sum | awk '{print $1}')
     uplink_network_hashed="mc-${lxd_prefix:0:4}-${uplink_hash:0:4}-up"
-    uplink_network_state=$(tofu state show -no-color lxd_network.ovn_uplink[0] 2>/dev/null | awk -F' = ' '$1=="name" {gsub(/\"/, "", $2); print $2; exit}')
+    uplink_network_state=$(tofu state show -no-color lxd_network.ovn_uplink[0] 2>/dev/null | awk -F' = ' '$1=="name" {gsub(/\"/, "", $2); print $2; exit}' || true)
 
     # If provider state is inconsistent, these resources can remain orphaned.
     for i in 1 2 3; do
@@ -860,6 +868,10 @@ cleanup_microcloud_orphans() {
 
     for i in 1 2 3; do
         lxc storage volume delete "$storage_pool" "${lxd_prefix}-ceph-${i}" >/dev/null 2>&1 || true
+    done
+
+    for i in 1 2 3; do
+        lxc storage volume delete "$storage_pool" "${lxd_prefix}-local-${i}" >/dev/null 2>&1 || true
     done
 
     if [[ -n "$uplink_network_state" ]]; then
@@ -893,12 +905,20 @@ reconcile_microcloud_orphans_with_state() {
     for i in 0 1 2; do
         local idx=$((i + 1))
         local vol_name="${lxd_prefix}-ceph-${idx}"
+        local local_vol_name="${lxd_prefix}-local-${idx}"
         local node_name="${lxd_prefix}-node-${idx}"
 
         if ! grep -q "^lxd_volume\\.microcloud_ceph_disks\\[${i}\\]$" <<< "$state_list"; then
             if lxc storage volume show "$storage_pool" "$vol_name" >/dev/null 2>&1; then
                 log_warn "Removing orphan volume not tracked in state: ${storage_pool}/${vol_name}"
                 lxc storage volume delete "$storage_pool" "$vol_name" >/dev/null 2>&1 || true
+            fi
+        fi
+
+        if ! grep -q "^lxd_volume\\.microcloud_local_disks\[${i}\]$" <<< "$state_list"; then
+            if lxc storage volume show "$storage_pool" "$local_vol_name" >/dev/null 2>&1; then
+                log_warn "Removing orphan volume not tracked in state: ${storage_pool}/${local_vol_name}"
+                lxc storage volume delete "$storage_pool" "$local_vol_name" >/dev/null 2>&1 || true
             fi
         fi
 
@@ -995,6 +1015,7 @@ print_microcloud_infra_summary() {
     print_kv "Node count" "${#nodes[@]}"
     print_kv "MicroCloud packages" "Not installed (student task)"
     print_kv "Cluster init" "Not performed (student task)"
+    print_kv "Local storage disk" "${MICROCLOUD_LOCAL_DISK_GIB} GB per node (third disk)"
     echo ""
     printf '  %-28s %-16s %s\n' "Node" "IP" "Next Step"
     printf '  %-28s %-16s %s\n' "----------------------------" "----------------" "------------------------------"
@@ -1124,7 +1145,13 @@ ensure_tools() {
 
 destroy_menu() {
     # Get active workspaces (ignoring default)
-    mapfile -t envs < <(tofu workspace list | tr -d '* ' | grep -v '^default$')
+    mapfile -t envs < <(
+        tofu workspace list \
+            | sed 's/^\*\s*//' \
+            | sed 's/^\s*//' \
+            | awk 'NF' \
+            | grep -v '^default$'
+    )
     
     if [ ${#envs[@]} -eq 0 ]; then
         echo -e "${YELLOW}No active lab environments (workspaces) found to delete.${NC}"
@@ -1571,6 +1598,11 @@ if [[ "$scenario" == "microcloud" ]]; then
     reconcile_microcloud_orphans_with_state "$workspace_name"
 fi
 
+MICROCLOUD_INFRA_ONLY_TF="false"
+if [[ "$scenario" == "microcloud" && "$MICROCLOUD_DEPLOY_MODE" == "infra-only" ]]; then
+    MICROCLOUD_INFRA_ONLY_TF="true"
+fi
+
 log_info "Provisioning infrastructure with OpenTofu..."
 tofu_apply_args=(
     -auto-approve
@@ -1597,6 +1629,8 @@ elif [[ "$scenario" == "microcloud" ]]; then
         -var="microcloud_node_memory_mb=${MICROCLOUD_NODE_MEMORY_MB}"
         -var="microcloud_root_disk_size_gib=${MICROCLOUD_ROOT_DISK_GIB}"
         -var="microcloud_ceph_disk_size_gib=${MICROCLOUD_CEPH_DISK_GIB}"
+        -var="microcloud_local_disk_size_gib=${MICROCLOUD_LOCAL_DISK_GIB}"
+        -var="microcloud_infra_only=${MICROCLOUD_INFRA_ONLY_TF}"
         -parallelism=1
     )
 elif [[ "$scenario" == "k8s-juju" ]]; then
