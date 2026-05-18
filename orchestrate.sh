@@ -21,6 +21,7 @@ MICROCLOUD_NODE_CPU="2"
 MICROCLOUD_NODE_MEMORY_MB="4096"
 MICROCLOUD_ROOT_DISK_GIB="40"
 MICROCLOUD_CEPH_DISK_GIB="50"
+MICROCLOUD_DEPLOY_MODE="full"
 K8S_CONTROL_PLANE_CPU="2"
 K8S_CONTROL_PLANE_MEMORY_GIB="4"
 K8S_WORKER_CPU="2"
@@ -841,9 +842,16 @@ destroy_environment() {
 cleanup_microcloud_orphans() {
     local env_name="$1"
     local lxd_prefix="${env_name//_/-}"
-    local uplink_network="mc-${lxd_prefix:0:8}-up"
+    local uplink_network_legacy="mc-${lxd_prefix:0:8}-up"
+    local uplink_hash=""
+    local uplink_network_hashed=""
+    local uplink_network_state=""
     local profile_name="${lxd_prefix}-iac-base"
     local storage_pool="${LXD_STORAGE_POOL}"
+
+    uplink_hash=$(printf '%s' "$lxd_prefix" | md5sum | awk '{print $1}')
+    uplink_network_hashed="mc-${lxd_prefix:0:4}-${uplink_hash:0:4}-up"
+    uplink_network_state=$(tofu state show -no-color lxd_network.ovn_uplink[0] 2>/dev/null | awk -F' = ' '$1=="name" {gsub(/\"/, "", $2); print $2; exit}')
 
     # If provider state is inconsistent, these resources can remain orphaned.
     for i in 1 2 3; do
@@ -854,26 +862,26 @@ cleanup_microcloud_orphans() {
         lxc storage volume delete "$storage_pool" "${lxd_prefix}-ceph-${i}" >/dev/null 2>&1 || true
     done
 
-    lxc network delete "$uplink_network" >/dev/null 2>&1 || true
+    if [[ -n "$uplink_network_state" ]]; then
+        lxc network delete "$uplink_network_state" >/dev/null 2>&1 || true
+    fi
+
+    lxc network delete "$uplink_network_hashed" >/dev/null 2>&1 || true
+    lxc network delete "$uplink_network_legacy" >/dev/null 2>&1 || true
     lxc profile delete "$profile_name" >/dev/null 2>&1 || true
 }
 
 reconcile_microcloud_orphans_with_state() {
     local env_name="$1"
     local lxd_prefix="${env_name//_/-}"
-    local uplink_network="mc-${lxd_prefix:0:8}-up"
     local profile_name="${lxd_prefix}-iac-base"
     local storage_pool="${LXD_STORAGE_POOL}"
     local state_list=""
 
     state_list=$(tofu state list 2>/dev/null || true)
 
-    if ! grep -q '^lxd_network\.ovn_uplink\[0\]$' <<< "$state_list"; then
-        if lxc network show "$uplink_network" >/dev/null 2>&1; then
-            log_warn "Removing orphan network not tracked in state: ${uplink_network}"
-            lxc network delete "$uplink_network" >/dev/null 2>&1 || true
-        fi
-    fi
+    # Never auto-delete networks when not tracked in state.
+    # Name-based deletion can remove another lab's live network.
 
     if ! grep -q '^lxd_profile\.lab_base$' <<< "$state_list"; then
         if lxc profile show "$profile_name" >/dev/null 2>&1; then
@@ -968,6 +976,33 @@ print_microcloud_summary() {
         else
             printf '  %-28s %-16s %s\n' "$node" "$ip" "https://${ip}:8443"
         fi
+    done
+}
+
+print_microcloud_infra_summary() {
+    local ws_name="$1"
+    local lxd_prefix="${ws_name//_/-}"
+    local ip=""
+
+    mapfile -t nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-node-" || true)
+
+    if [[ ${#nodes[@]} -eq 0 ]]; then
+        log_warn "Could not find MicroCloud nodes for summary output."
+        return
+    fi
+
+    print_section "MicroCloud Infra-Only Deployment Summary"
+    print_kv "Node count" "${#nodes[@]}"
+    print_kv "MicroCloud packages" "Not installed (student task)"
+    print_kv "Cluster init" "Not performed (student task)"
+    echo ""
+    printf '  %-28s %-16s %s\n' "Node" "IP" "Next Step"
+    printf '  %-28s %-16s %s\n' "----------------------------" "----------------" "------------------------------"
+
+    for node in "${nodes[@]}"; do
+        ip=$(get_node_primary_ip "$node")
+        ip="${ip:-N/A}"
+        printf '  %-28s %-16s %s\n' "$node" "$ip" "SSH and install MicroCloud"
     done
 }
 
@@ -1158,6 +1193,7 @@ echo "1) Deploy Canonical K8s (Snap)"
 echo "2) Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)"
 echo "3) Deploy Canonical K8s (Juju)"
 echo "4) Destroy Environments"
+echo "5) Deploy MicroCloud Infra-Only (3 Node VM Infra w/ Ceph & OVN)"
 echo ""
 read -p "Select action: " action
 
@@ -1168,8 +1204,15 @@ fi
 
 case $action in
     1) scenario="k8s-snap" ;;
-    2) scenario="microcloud" ;;
+    2)
+        scenario="microcloud"
+        MICROCLOUD_DEPLOY_MODE="full"
+        ;;
     3) scenario="k8s-juju" ;;
+    5)
+        scenario="microcloud"
+        MICROCLOUD_DEPLOY_MODE="infra-only"
+        ;;
     *) echo "Invalid selection."; exit 1 ;;
 esac
 
@@ -1579,10 +1622,16 @@ if [[ "$scenario" == "k8s-snap" ]]; then
     print_section "Access"
     print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
 elif [[ "$scenario" == "microcloud" ]]; then
-    log_info "Running Ansible Orchestration for MicroCloud..."
-    ansible-playbook -i "$inventory_file" playbooks/microcloud.yml
-    log_success "MicroCloud Lab Deployed Successfully!"
-    print_microcloud_summary "$workspace_name"
+    if [[ "$MICROCLOUD_DEPLOY_MODE" == "infra-only" ]]; then
+        log_info "Skipping MicroCloud package installation and cluster bootstrap (infra-only mode)..."
+        log_success "MicroCloud Infra-Only Lab Deployed Successfully!"
+        print_microcloud_infra_summary "$workspace_name"
+    else
+        log_info "Running Ansible Orchestration for MicroCloud..."
+        ansible-playbook -i "$inventory_file" playbooks/microcloud.yml
+        log_success "MicroCloud Lab Deployed Successfully!"
+        print_microcloud_summary "$workspace_name"
+    fi
     print_section "Access"
     print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
 fi
