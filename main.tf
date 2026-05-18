@@ -268,8 +268,9 @@ resource "lxd_profile" "lab_base" {
 # Network without IP for MicroOVN (Uplink)
 resource "lxd_network" "ovn_uplink" {
   count = var.scenario == "microcloud" ? 1 : 0
-  # Limit network name to 15 characters to avoid LXD bridge name limits
-  name  = "mc-${substr(local.lxd_prefix, 0, 8)}-up"
+  # Keep bridge name <= 15 chars and unique per workspace to avoid collisions.
+  # Format: mc-<prefix4>-<hash4>-up
+  name  = "mc-${substr(local.lxd_prefix, 0, 4)}-${substr(md5(local.lxd_prefix), 0, 4)}-up"
   type  = "bridge"
   config = {
     "ipv4.address" = "none"

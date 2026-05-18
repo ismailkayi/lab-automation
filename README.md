@@ -97,6 +97,7 @@ You will then choose one of these options:
 2) Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)
 3) Deploy Canonical K8s (Juju)
 4) Destroy Environments
+5) Deploy MicroCloud Infra-Only (3 Node VM Infra w/ Ceph & OVN)
 ```
 
 ## Visual Walkthrough
@@ -123,6 +124,11 @@ The script converts it into a workspace name automatically:
 If you enter the full workspace name by mistake, the script normalizes it automatically.
 
 ## Deploying MicroCloud
+
+MicroCloud has two deploy options in the menu:
+
+- `Deploy MicroCloud`: existing flow, includes package installation and automated cluster bootstrap
+- `Deploy MicroCloud Infra-Only`: creates the same 3-node VM/network/disk infrastructure, but does not install MicroCloud packages or initialize the cluster
 
 MicroCloud currently uses a fixed topology:
 
