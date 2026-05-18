@@ -228,10 +228,27 @@ variable "microcloud_ceph_disk_size_gib" {
   }
 }
 
+variable "microcloud_local_disk_size_gib" {
+  description = "Local storage disk size in GiB per MicroCloud node (infra-only mode)"
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.microcloud_local_disk_size_gib >= 5
+    error_message = "microcloud_local_disk_size_gib must be at least 5 GiB."
+  }
+}
+
+variable "microcloud_infra_only" {
+  description = "Whether current MicroCloud deployment is infra-only mode"
+  type        = bool
+  default     = false
+}
+
 locals {
   # Original environment ID for local files (e.g., ismail_microcloud)
   env_id = terraform.workspace == "default" ? var.user_prefix : terraform.workspace
-  
+
   # LXD safe prefix: Replaces underscores with hyphens to strictly comply with LXD naming rules
   # (e.g., "ismail_microcloud" becomes "ismail-microcloud")
   lxd_prefix = replace(local.env_id, "_", "-")
@@ -270,8 +287,8 @@ resource "lxd_network" "ovn_uplink" {
   count = var.scenario == "microcloud" ? 1 : 0
   # Keep bridge name <= 15 chars and unique per workspace to avoid collisions.
   # Format: mc-<prefix4>-<hash4>-up
-  name  = "mc-${substr(local.lxd_prefix, 0, 4)}-${substr(md5(local.lxd_prefix), 0, 4)}-up"
-  type  = "bridge"
+  name = "mc-${substr(local.lxd_prefix, 0, 4)}-${substr(md5(local.lxd_prefix), 0, 4)}-up"
+  type = "bridge"
   config = {
     "ipv4.address" = "none"
     "ipv6.address" = "none"
@@ -285,6 +302,15 @@ resource "lxd_volume" "microcloud_ceph_disks" {
   pool         = var.lxd_storage_pool
   content_type = "block"
   config       = { size = "${var.microcloud_ceph_disk_size_gib}GiB" }
+}
+
+# Additional disks for local storage training exercises (infra-only mode)
+resource "lxd_volume" "microcloud_local_disks" {
+  count        = var.scenario == "microcloud" && var.microcloud_infra_only ? 3 : 0
+  name         = "${local.lxd_prefix}-local-${count.index + 1}"
+  pool         = var.lxd_storage_pool
+  content_type = "block"
+  config       = { size = "${var.microcloud_local_disk_size_gib}GiB" }
 }
 
 resource "lxd_instance" "microcloud_nodes" {
@@ -315,6 +341,19 @@ resource "lxd_instance" "microcloud_nodes" {
     properties = {
       source = lxd_volume.microcloud_ceph_disks[count.index].name
       pool   = var.lxd_storage_pool
+    }
+  }
+
+  # Third disk for local storage labs (for example ZFS exercises in infra-only mode)
+  dynamic "device" {
+    for_each = var.scenario == "microcloud" && var.microcloud_infra_only ? [1] : []
+    content {
+      name = "local-disk"
+      type = "disk"
+      properties = {
+        source = lxd_volume.microcloud_local_disks[count.index].name
+        pool   = var.lxd_storage_pool
+      }
     }
   }
 
