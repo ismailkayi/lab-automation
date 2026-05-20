@@ -228,6 +228,12 @@ variable "microcloud_ceph_disk_size_gib" {
   }
 }
 
+variable "microcloud_uplink_network_name" {
+  description = "LXD bridge network name used as the MicroCloud OVN uplink"
+  type        = string
+  default     = ""
+}
+
 variable "microcloud_local_disk_size_gib" {
   description = "Local storage disk size in GiB per MicroCloud node (infra-only mode)"
   type        = number
@@ -282,19 +288,6 @@ resource "lxd_profile" "lab_base" {
 
 # --- SCENARIOS ---
 
-# Network without IP for MicroOVN (Uplink)
-resource "lxd_network" "ovn_uplink" {
-  count = var.scenario == "microcloud" ? 1 : 0
-  # Keep bridge name <= 15 chars and unique per workspace to avoid collisions.
-  # Format: mc-<prefix4>-<hash4>-up
-  name = "mc-${substr(local.lxd_prefix, 0, 4)}-${substr(md5(local.lxd_prefix), 0, 4)}-up"
-  type = "bridge"
-  config = {
-    "ipv4.address" = "none"
-    "ipv6.address" = "none"
-  }
-}
-
 # Additional disks for MicroCeph
 resource "lxd_volume" "microcloud_ceph_disks" {
   count        = var.scenario == "microcloud" ? 3 : 0
@@ -330,7 +323,7 @@ resource "lxd_instance" "microcloud_nodes" {
     name = "eth1"
     type = "nic"
     properties = {
-      network = lxd_network.ovn_uplink[0].name
+      network = var.microcloud_uplink_network_name
     }
   }
 

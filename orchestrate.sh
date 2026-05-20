@@ -829,6 +829,12 @@ destroy_environment() {
         )
     fi
 
+    if [[ "$env_scenario" == "microcloud" ]]; then
+        destroy_args+=(
+            -var="microcloud_uplink_network_name=$(resolve_microcloud_uplink_network_name "$env_name")"
+        )
+    fi
+
     tofu destroy "${destroy_args[@]}"
 
     if [[ "$env_scenario" == "microcloud" ]]; then
@@ -851,15 +857,11 @@ cleanup_microcloud_orphans() {
     local env_name="$1"
     local lxd_prefix="${env_name//_/-}"
     local uplink_network_legacy="mc-${lxd_prefix:0:8}-up"
-    local uplink_hash=""
-    local uplink_network_hashed=""
-    local uplink_network_state=""
+    local uplink_network_name=""
     local profile_name="${lxd_prefix}-iac-base"
     local storage_pool="${LXD_STORAGE_POOL}"
 
-    uplink_hash=$(printf '%s' "$lxd_prefix" | md5sum | awk '{print $1}')
-    uplink_network_hashed="mc-${lxd_prefix:0:4}-${uplink_hash:0:4}-up"
-    uplink_network_state=$(tofu state show -no-color lxd_network.ovn_uplink[0] 2>/dev/null | awk -F' = ' '$1=="name" {gsub(/\"/, "", $2); print $2; exit}' || true)
+    uplink_network_name=$(resolve_microcloud_uplink_network_name "$env_name")
 
     # If provider state is inconsistent, these resources can remain orphaned.
     for i in 1 2 3; do
@@ -874,11 +876,7 @@ cleanup_microcloud_orphans() {
         lxc storage volume delete "$storage_pool" "${lxd_prefix}-local-${i}" >/dev/null 2>&1 || true
     done
 
-    if [[ -n "$uplink_network_state" ]]; then
-        lxc network delete "$uplink_network_state" >/dev/null 2>&1 || true
-    fi
-
-    lxc network delete "$uplink_network_hashed" >/dev/null 2>&1 || true
+    lxc network delete "$uplink_network_name" >/dev/null 2>&1 || true
     lxc network delete "$uplink_network_legacy" >/dev/null 2>&1 || true
     lxc profile delete "$profile_name" >/dev/null 2>&1 || true
 }
@@ -915,7 +913,7 @@ reconcile_microcloud_orphans_with_state() {
             fi
         fi
 
-        if ! grep -q "^lxd_volume\\.microcloud_local_disks\[${i}\]$" <<< "$state_list"; then
+        if ! grep -q "^lxd_volume\\.microcloud_local_disks\\[${i}\\]$" <<< "$state_list"; then
             if lxc storage volume show "$storage_pool" "$local_vol_name" >/dev/null 2>&1; then
                 log_warn "Removing orphan volume not tracked in state: ${storage_pool}/${local_vol_name}"
                 lxc storage volume delete "$storage_pool" "$local_vol_name" >/dev/null 2>&1 || true
@@ -951,6 +949,15 @@ list_lxd_instances_by_prefix() {
     local prefix="$1"
 
     lxc list --format csv 2>/dev/null | awk -F',' -v prefix="$prefix" 'index($1, prefix) == 1 {print $1}'
+}
+
+resolve_microcloud_uplink_network_name() {
+    local ws_name="$1"
+    local lxd_prefix="${ws_name//_/-}"
+    local uplink_hash=""
+
+    uplink_hash=$(printf '%s' "$lxd_prefix" | md5sum | awk '{print $1}')
+    echo "mc-${lxd_prefix:0:4}-${uplink_hash:0:4}-up"
 }
 
 print_microcloud_summary() {
@@ -1213,7 +1220,7 @@ echo -e "${CYAN}==========================================================${NC}"
 
 ensure_tools
 detect_lxd_defaults
-tofu init -v >/dev/null 2>&1
+tofu init -input=false >/dev/null 2>&1
 
 echo ""
 echo "1) Deploy Canonical K8s (Snap)"
@@ -1603,6 +1610,15 @@ if [[ "$scenario" == "microcloud" && "$MICROCLOUD_DEPLOY_MODE" == "infra-only" ]
     MICROCLOUD_INFRA_ONLY_TF="true"
 fi
 
+MICROCLOUD_UPLINK_NETWORK_NAME=""
+if [[ "$scenario" == "microcloud" ]]; then
+    MICROCLOUD_UPLINK_NETWORK_NAME="$(resolve_microcloud_uplink_network_name "$workspace_name")"
+    if ! lxc network show "$MICROCLOUD_UPLINK_NETWORK_NAME" >/dev/null 2>&1; then
+        log_info "Creating MicroCloud uplink network: ${MICROCLOUD_UPLINK_NETWORK_NAME}"
+        lxc network create "$MICROCLOUD_UPLINK_NETWORK_NAME" --type=bridge ipv4.address=none ipv6.address=none
+    fi
+fi
+
 log_info "Provisioning infrastructure with OpenTofu..."
 tofu_apply_args=(
     -auto-approve
@@ -1631,6 +1647,7 @@ elif [[ "$scenario" == "microcloud" ]]; then
         -var="microcloud_ceph_disk_size_gib=${MICROCLOUD_CEPH_DISK_GIB}"
         -var="microcloud_local_disk_size_gib=${MICROCLOUD_LOCAL_DISK_GIB}"
         -var="microcloud_infra_only=${MICROCLOUD_INFRA_ONLY_TF}"
+        -var="microcloud_uplink_network_name=${MICROCLOUD_UPLINK_NETWORK_NAME}"
         -parallelism=1
     )
 elif [[ "$scenario" == "k8s-juju" ]]; then
