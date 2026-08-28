@@ -184,6 +184,17 @@ variable "lxd_storage_pool" {
   type        = string
 }
 
+variable "microcloud_node_count" {
+  description = "Number of MicroCloud nodes managed by the lab automation"
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.microcloud_node_count >= 3 && var.microcloud_node_count <= 10
+    error_message = "microcloud_node_count must be between 3 and 10."
+  }
+}
+
 variable "microcloud_node_cpu" {
   description = "vCPU count per MicroCloud node"
   type        = number
@@ -235,7 +246,7 @@ variable "microcloud_uplink_network_name" {
 }
 
 variable "microcloud_local_disk_size_gib" {
-  description = "Local storage disk size in GiB per MicroCloud node (infra-only mode)"
+  description = "Local storage disk size in GiB per MicroCloud training node"
   type        = number
   default     = 20
 
@@ -246,7 +257,7 @@ variable "microcloud_local_disk_size_gib" {
 }
 
 variable "microcloud_infra_only" {
-  description = "Whether current MicroCloud deployment is infra-only mode"
+  description = "Whether the current MicroCloud deployment is a training infrastructure-only lab"
   type        = bool
   default     = false
 }
@@ -290,16 +301,16 @@ resource "lxd_profile" "lab_base" {
 
 # Additional disks for MicroCeph
 resource "lxd_volume" "microcloud_ceph_disks" {
-  count        = var.scenario == "microcloud" ? 3 : 0
+  count        = var.scenario == "microcloud" ? var.microcloud_node_count : 0
   name         = "${local.lxd_prefix}-ceph-${count.index + 1}"
   pool         = var.lxd_storage_pool
   content_type = "block"
   config       = { size = "${var.microcloud_ceph_disk_size_gib}GiB" }
 }
 
-# Additional disks for local storage training exercises (infra-only mode)
+# Additional disks for local storage training exercises
 resource "lxd_volume" "microcloud_local_disks" {
-  count        = var.scenario == "microcloud" && var.microcloud_infra_only ? 3 : 0
+  count        = var.scenario == "microcloud" && var.microcloud_infra_only ? var.microcloud_node_count : 0
   name         = "${local.lxd_prefix}-local-${count.index + 1}"
   pool         = var.lxd_storage_pool
   content_type = "block"
@@ -307,7 +318,7 @@ resource "lxd_volume" "microcloud_local_disks" {
 }
 
 resource "lxd_instance" "microcloud_nodes" {
-  count    = var.scenario == "microcloud" ? 3 : 0
+  count    = var.scenario == "microcloud" ? var.microcloud_node_count : 0
   name     = "${local.lxd_prefix}-node-${count.index + 1}"
   image    = var.ubuntu_image
   type     = "virtual-machine"
@@ -337,7 +348,7 @@ resource "lxd_instance" "microcloud_nodes" {
     }
   }
 
-  # Third disk for local storage labs (for example ZFS exercises in infra-only mode)
+  # Third disk for local storage labs (for example ZFS exercises)
   dynamic "device" {
     for_each = var.scenario == "microcloud" && var.microcloud_infra_only ? [1] : []
     content {

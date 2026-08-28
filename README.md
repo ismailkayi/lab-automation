@@ -13,8 +13,8 @@ Supported scenarios:
 - [Download](#download)
 - [Before You Start](#before-you-start)
 - [Quick Start](#quick-start)
-- [Visual Walkthrough](#visual-walkthrough)
 - [How Naming Works](#how-naming-works)
+- [Training Labs](#training-labs)
 - [Deploying MicroCloud](#deploying-microcloud)
 - [Deploying Canonical Kubernetes](#deploying-canonical-kubernetes)
 - [Deploying Canonical Kubernetes (Juju)](#deploying-canonical-kubernetes-juju)
@@ -73,8 +73,14 @@ This script checks the host and prepares missing requirements automatically. It 
 - install the `community.general` collection
 - create `~/.ssh/id_rsa_lab` if missing
 - run `tofu init`
+- validate LXD storage, networking, and non-root user access
+- repair ownership of generated lab files left by an earlier sudo run
 
 This is the easiest option for a new user.
+
+Run `prep_host.sh` as the regular user who will operate the labs. The script requests sudo only for host-level changes. If it adds the user to the `lxd` group, open a new login session or run `newgrp lxd` before starting the orchestrator.
+
+Do not run `orchestrate.sh` with sudo. It deliberately exits when run as root so SSH keys, state, and inventory files remain owned by the regular lab user.
 
 ### Option 2: Prepare the host yourself
 
@@ -90,22 +96,23 @@ chmod +x orchestrate.sh
 ./orchestrate.sh
 ```
 
-You will then choose one of these options:
+You will then choose one of these grouped options:
 
 ```text
-1) Deploy Canonical K8s (Snap)
-2) Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)
-3) Deploy Canonical K8s (Juju)
-4) Destroy Environments
-5) Deploy MicroCloud Infra-Only (3 Node VM Infra w/ Ceph & OVN)
+FULL LAB DEPLOYMENTS
+  1) MicroCloud (automated deployment)
+  2) Canonical K8s - Snap (automated deployment)
+  3) Canonical K8s - Juju (automated deployment)
+
+TRAINING LABS - INFRASTRUCTURE ONLY
+  4) MicroCloud Training
+  5) Canonical K8s - Snap Training
+  6) Canonical K8s - Juju Training
+
+ENVIRONMENT MANAGEMENT
+  7) Destroy Environments
+  0) Exit
 ```
-
-## Visual Walkthrough
-
-Main action menu:
-
-![Main menu](docs/images/main-menu.png)
-
 
 ## How Naming Works
 
@@ -120,26 +127,50 @@ The script converts it into a workspace name automatically:
 - Kubernetes: `mylab_k8s-snap`
 - Kubernetes (Juju): `mylab_k8s-juju`
 - MicroCloud: `mylab_microcloud`
+- Kubernetes training: `mylab_training-k8s-snap`
+- Kubernetes (Juju) training: `mylab_training-k8s-juju`
+- MicroCloud training: `mylab_training-microcloud`
 
-If you enter the full workspace name by mistake, the script normalizes it automatically.
+## Training Labs
+
+Training options provision the same VM roles, sizing, networking, disks, and SSH access as their corresponding full lab. They intentionally do not run product installation or cluster bootstrap playbooks.
+
+- MicroCloud Training leaves MicroCloud, MicroCeph, MicroOVN, and LXD installation to participants.
+- Canonical K8s Snap Training leaves the Canonical K8s snap and cluster bootstrap to participants.
+- Canonical K8s Juju Training leaves Juju installation, controller bootstrap, and Kubernetes deployment to participants.
+
+After OpenTofu finishes, the script waits for cloud-init and verifies SSH access to every training VM. The final summary lists each node, its role and IP, and the participant's next step.
+
+Full and training labs use different workspace names, so the same prefix can be used for both without sharing state. Legacy MicroCloud infra-only workspaces are still recognized as training labs.
 
 ## Deploying MicroCloud
 
-MicroCloud has two deploy options in the menu:
+MicroCloud has two deployment modes:
 
-- `Deploy MicroCloud`: existing flow, includes package installation and automated cluster bootstrap
-- `Deploy MicroCloud Infra-Only`: creates the same 3-node VM/network/disk infrastructure, but does not install MicroCloud packages or initialize the cluster
-	- each node also gets an extra small local storage disk for student exercises (for example local ZFS tests)
+- `MicroCloud`: installs packages and performs automated cluster bootstrap
+- `MicroCloud Training`: creates VM/network/disk infrastructure without installing MicroCloud packages or initializing the cluster
+  - each training node gets an extra local storage disk for participant exercises, such as local ZFS tests
 
-MicroCloud currently uses a fixed topology:
+For a new or rebuilt MicroCloud lab, choose between `3` and `10` nodes:
 
-- `3` nodes
+- default: `3`
+- minimum: `3`
+- maximum enforced by this lab automation: `10`
 - MicroCeph enabled
 - MicroOVN enabled
 
+The node count can be selected for full and training labs. Changing the node count of an existing MicroCloud lab requires a rebuild.
+
+The existing two-interface network model is unchanged:
+
+- `eth0`: management, SSH, and cluster communication
+- `eth1`: dedicated IP-free MicroOVN uplink
+
+Separate Ceph and OVN underlay networks are not configured by this version.
+
 ### MicroCloud Sizing Profiles
 
-During MicroCloud deployment, the script scans host resources and suggests per-node sizing for the fixed 3-node cluster.
+During MicroCloud deployment, the script scans host resources and suggests per-node sizing for the selected node count. It stops before provisioning if the selected topology and profile exceed available CPU, RAM, or storage after host reserve.
 
 - `balanced`: default profile
 - `conservative`: smaller than balanced
@@ -279,7 +310,7 @@ Important:
 Choose:
 
 ```text
-4) Destroy Environments
+7) Destroy Environments
 ```
 
 Then:
@@ -304,20 +335,21 @@ ssh -i ~/.ssh/id_rsa_lab ubuntu@<VM_IP>
 ### New MicroCloud Lab
 
 1. Run `./orchestrate.sh`
-2. Choose `Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)`
+2. Choose `MicroCloud (automated deployment)`
 3. Enter a lab prefix
+4. Choose a node count from `3` to `10`
 
 ### New Kubernetes Lab
 
 1. Run `./orchestrate.sh`
-2. Choose `Deploy Canonical K8s (Snap)`
+2. Choose `Canonical K8s - Snap (automated deployment)`
 3. Enter a lab prefix such as `demo`
 4. Accept defaults or choose your topology
 
 ### Expand an Existing Kubernetes Lab
 
 1. Run `./orchestrate.sh`
-2. Choose `Deploy Canonical K8s (Snap)`
+2. Choose `Canonical K8s - Snap (automated deployment)`
 3. Enter the same lab prefix as before
 4. Choose `add`
 5. Increase control-plane or worker-only count
@@ -325,14 +357,14 @@ ssh -i ~/.ssh/id_rsa_lab ubuntu@<VM_IP>
 ### New Kubernetes (Juju) Lab
 
 1. Run `./orchestrate.sh`
-2. Choose `Deploy Canonical K8s (Juju)`
+2. Choose `Canonical K8s - Juju (automated deployment)`
 3. Enter a lab prefix such as `demo`
 4. Accept defaults or choose your topology
 
 ### Expand an Existing Kubernetes (Juju) Lab
 
 1. Run `./orchestrate.sh`
-2. Choose `Deploy Canonical K8s (Juju)`
+2. Choose `Canonical K8s - Juju (automated deployment)`
 3. Select the existing lab
 4. Choose `update in place`
 5. Increase control-plane or worker count
@@ -343,6 +375,7 @@ ssh -i ~/.ssh/id_rsa_lab ubuntu@<VM_IP>
 - Kubernetes (Juju) re-runs can reconcile newly added Juju machines into the cluster
 - MicroCloud re-runs are intended for verification and reconciliation of a healthy cluster
 - MicroCloud Terraform apply runs serially to reduce provider race issues during volume creation
+- Training deployments never run the product installation playbooks
 
 ## Troubleshooting
 
@@ -361,6 +394,14 @@ In-place shrink is intentionally blocked. Use `rebuild`.
 ### A MicroCloud deployment failed midway
 
 Use the destroy workflow and deploy again.
+
+### LXD only works with sudo
+
+Run `./prep_host.sh` as your regular user. If it adds you to the `lxd` group, run `newgrp lxd` or open a new login session before running `./orchestrate.sh`.
+
+### SSH points to `/root/.ssh/id_rsa_lab`
+
+The lab was created by running the orchestrator with sudo. New runs are blocked in root context. Destroy the affected lab and recreate it as the regular user so `~/.ssh/id_rsa_lab` is injected into the VMs.
 
 ## Summary
 

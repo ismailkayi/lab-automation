@@ -14,6 +14,7 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
 LXD_NETWORK_NAME=""
 LXD_STORAGE_POOL=""
@@ -22,7 +23,9 @@ MICROCLOUD_NODE_MEMORY_MB="4096"
 MICROCLOUD_ROOT_DISK_GIB="40"
 MICROCLOUD_CEPH_DISK_GIB="50"
 MICROCLOUD_LOCAL_DISK_GIB="20"
-MICROCLOUD_DEPLOY_MODE="full"
+MICROCLOUD_NODE_COUNT="3"
+MICROCLOUD_MAX_NODES="10"
+DEPLOYMENT_MODE="full"
 K8S_CONTROL_PLANE_CPU="2"
 K8S_CONTROL_PLANE_MEMORY_GIB="4"
 K8S_WORKER_CPU="2"
@@ -469,6 +472,7 @@ get_storage_available_gib() {
 }
 
 configure_microcloud_sizing() {
+    local node_count="$1"
     local cpu_total="0"
     local ram_total_mb="0"
     local storage_available_gib="0"
@@ -503,50 +507,70 @@ configure_microcloud_sizing() {
     local performance_memory_cap_gb="0"
     local performance_ceph_cap_gib="0"
     local selected_memory_gb="0"
+    local selected_total_cpu="0"
+    local selected_total_memory_mb="0"
+    local selected_total_disk_gib="0"
+    local per_node_extra_disk_gib="0"
 
     cpu_total=$(nproc 2>/dev/null || echo 4)
     ram_total_mb=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
     storage_available_gib=$(get_storage_available_gib)
     host_ram_gb=$(( (ram_total_mb + 1023) / 1024 ))
-    host_ram_per_node_gb=$(( host_ram_gb / 3 ))
+    host_ram_per_node_gb=$(( host_ram_gb / node_count ))
 
     reserve_cpu=$(( cpu_total / 5 ))
     if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
     usable_cpu=$(( cpu_total - reserve_cpu ))
-    if (( usable_cpu < 3 )); then usable_cpu=3; fi
 
     reserve_ram_mb=$(( ram_total_mb / 5 ))
     if (( reserve_ram_mb < 4096 )); then reserve_ram_mb=4096; fi
     usable_ram_mb=$(( ram_total_mb - reserve_ram_mb ))
-    if (( usable_ram_mb < 12288 )); then usable_ram_mb=12288; fi
 
     usable_disk_gib=$(( storage_available_gib - 20 ))
-    if (( usable_disk_gib < 120 )); then usable_disk_gib=120; fi
+    if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+        per_node_extra_disk_gib="$MICROCLOUD_LOCAL_DISK_GIB"
+    fi
+
+    if (( usable_cpu < node_count )); then
+        echo "Insufficient host CPU for ${node_count} MicroCloud nodes after host reserve (${usable_cpu} vCPU available)."
+        exit 1
+    fi
+
+    if (( usable_ram_mb < node_count * 1024 )); then
+        echo "Insufficient host RAM for ${node_count} MicroCloud nodes after host reserve (${usable_ram_mb} MB available)."
+        exit 1
+    fi
+
+    if (( usable_disk_gib < node_count * (20 + 10 + per_node_extra_disk_gib) )); then
+        echo "Insufficient storage for the minimum ${node_count}-node MicroCloud layout (${usable_disk_gib} GB available after reserve)."
+        exit 1
+    fi
 
     conservative_root_gib=30
     balanced_root_gib=40
     performance_root_gib=50
 
-    raw_balanced_cpu=$(( usable_cpu / 3 ))
+    raw_balanced_cpu=$(( usable_cpu / node_count ))
     balanced_cpu=$(round_down_even "$raw_balanced_cpu" 2)
-    conservative_cpu=$(round_down_even $(( balanced_cpu - 2 )) 2)
-    performance_cpu_limit=$(round_down_even $(( cpu_total / 3 )) "$balanced_cpu")
+    conservative_cpu=$(( balanced_cpu - 2 ))
+    if (( conservative_cpu < 1 )); then conservative_cpu=1; fi
+    performance_cpu_limit=$(round_down_even $(( usable_cpu / node_count )) "$balanced_cpu")
     performance_cpu=$(( balanced_cpu + 2 ))
     if (( performance_cpu > performance_cpu_limit )); then
         performance_cpu="$performance_cpu_limit"
     fi
 
-    raw_balanced_memory_gb=$(( usable_ram_mb / 3072 ))
+    raw_balanced_memory_gb=$(( usable_ram_mb / (node_count * 1024) ))
     balanced_memory_gb=$(pick_floor_tier "$raw_balanced_memory_gb" 8 12 16 24 32 48 64 96 128)
     conservative_memory_gb=$(pick_previous_tier "$balanced_memory_gb" 4 8 12 16 24 32 48 64 96 128)
     performance_memory_cap_gb=$(pick_floor_tier "$host_ram_per_node_gb" 8 12 16 24 32 48 64 96 128)
     performance_memory_gb=$(pick_next_tier "$balanced_memory_gb" "$performance_memory_cap_gb" 4 8 12 16 24 32 48 64 96 128)
 
-    raw_balanced_ceph_gib=$(( (usable_disk_gib / 3) - balanced_root_gib ))
+    raw_balanced_ceph_gib=$(( (usable_disk_gib / node_count) - balanced_root_gib - per_node_extra_disk_gib ))
     if (( raw_balanced_ceph_gib < 20 )); then raw_balanced_ceph_gib=20; fi
     balanced_ceph_gib=$(pick_floor_tier "$raw_balanced_ceph_gib" 20 50 100 150 200 250 300 400 500)
     conservative_ceph_gib=$(pick_previous_tier "$balanced_ceph_gib" 20 50 100 150 200 250 300 400 500)
-    performance_ceph_cap_gib=$(( (storage_available_gib / 3) - performance_root_gib ))
+    performance_ceph_cap_gib=$(( (usable_disk_gib / node_count) - performance_root_gib - per_node_extra_disk_gib ))
     if (( performance_ceph_cap_gib < 20 )); then performance_ceph_cap_gib=20; fi
     performance_cpu_cap=$(pick_floor_tier "$performance_ceph_cap_gib" 20 50 100 150 200 250 300 400 500)
     performance_ceph_gib=$(pick_next_tier "$balanced_ceph_gib" "$performance_cpu_cap" 20 50 100 150 200 250 300 400 500)
@@ -556,6 +580,7 @@ configure_microcloud_sizing() {
     performance_memory_mb=$(( performance_memory_gb * 1024 ))
 
     print_section "MicroCloud Sizing Advisor"
+    print_kv "Node count" "${node_count}"
     print_kv "Host CPU cores" "${cpu_total}"
     print_kv "Host RAM" "${host_ram_gb} GB"
     print_kv "Storage (pool ${LXD_STORAGE_POOL})" "${storage_available_gib} GB"
@@ -631,6 +656,24 @@ configure_microcloud_sizing() {
         exit 1
     fi
     selected_memory_gb=$(( (MICROCLOUD_NODE_MEMORY_MB + 1023) / 1024 ))
+    selected_total_cpu=$(( node_count * MICROCLOUD_NODE_CPU ))
+    selected_total_memory_mb=$(( node_count * MICROCLOUD_NODE_MEMORY_MB ))
+    selected_total_disk_gib=$(( node_count * (MICROCLOUD_ROOT_DISK_GIB + MICROCLOUD_CEPH_DISK_GIB + per_node_extra_disk_gib) ))
+
+    if (( selected_total_cpu > usable_cpu )); then
+        echo "Selected MicroCloud profile requires ${selected_total_cpu} vCPU, but only ${usable_cpu} vCPU are available after host reserve."
+        exit 1
+    fi
+
+    if (( selected_total_memory_mb > usable_ram_mb )); then
+        echo "Selected MicroCloud profile requires ${selected_total_memory_mb} MB RAM, but only ${usable_ram_mb} MB are available after host reserve."
+        exit 1
+    fi
+
+    if (( selected_total_disk_gib > usable_disk_gib )); then
+        echo "Selected MicroCloud profile requires ${selected_total_disk_gib} GB storage, but only ${usable_disk_gib} GB are available after host reserve."
+        exit 1
+    fi
 
     print_section "Selected MicroCloud Sizing"
     print_sizing_table_header
@@ -644,6 +687,8 @@ detect_lxd_defaults() {
     local candidate_type=""
     local ipv4_addr=""
     local bridge_inventory=""
+    local current_user=""
+    local group_list=""
 
     if ! command -v lxc &> /dev/null; then
         log_warn "LXD CLI (lxc) not found. Run ./prep_host.sh first."
@@ -651,7 +696,24 @@ detect_lxd_defaults() {
     fi
 
     if ! lxc info >/dev/null 2>&1; then
-        log_warn "LXD is not reachable for the current user. Run ./prep_host.sh first."
+        current_user="${SUDO_USER:-${USER:-$(id -un)}}"
+        group_list=$(id -nG "$current_user" 2>/dev/null || true)
+
+        log_warn "LXD is not reachable for the current user (${current_user})."
+        if [[ " $group_list " != *" lxd "* ]]; then
+            log_warn "User is not in the 'lxd' group."
+            log_warn "Run: sudo usermod -aG lxd ${current_user}"
+            log_warn "Then re-login (or run: newgrp lxd) and retry."
+        elif [[ " $(id -nG) " != *" lxd "* ]]; then
+            log_warn "The user is registered in the 'lxd' group, but this shell has not activated it."
+            log_warn "Run 'newgrp lxd' or open a new login session, then retry."
+        fi
+
+        if sudo -n lxc info >/dev/null 2>&1; then
+            log_warn "LXD works with sudo, which indicates a user permission issue."
+        fi
+
+        log_warn "If needed, run ./prep_host.sh to prepare host prerequisites."
         exit 1
     fi
 
@@ -727,9 +789,103 @@ workspace_exists() {
     tofu workspace list | tr -d '* ' | grep -qx "$workspace_name"
 }
 
+get_workspace_suffix() {
+    local scenario_name="$1"
+    local deployment_mode="$2"
+
+    if [[ "$deployment_mode" == "training" ]]; then
+        echo "training-${scenario_name}"
+    else
+        echo "$scenario_name"
+    fi
+}
+
+get_lab_prefix_from_workspace() {
+    local workspace_name="$1"
+    local scenario_name="$2"
+    local deployment_mode="$3"
+    local expected_suffix=""
+
+    expected_suffix="$(get_workspace_suffix "$scenario_name" "$deployment_mode")"
+    if [[ "$workspace_name" == *"_${expected_suffix}" ]]; then
+        echo "${workspace_name%_${expected_suffix}}"
+    else
+        # Legacy MicroCloud infra-only workspaces used the full-deployment suffix.
+        echo "${workspace_name%_${scenario_name}}"
+    fi
+}
+
+workspace_is_legacy_microcloud_training() {
+    local workspace_name="$1"
+    local previous_workspace=""
+    local result=1
+
+    [[ "$workspace_name" == *"_microcloud" ]] || return 1
+
+    previous_workspace=$(tofu workspace show 2>/dev/null || echo "default")
+    if tofu workspace select "$workspace_name" >/dev/null 2>&1; then
+        if tofu state list 2>/dev/null | grep -q '^lxd_volume\.microcloud_local_disks\['; then
+            result=0
+        fi
+        tofu workspace select "$previous_workspace" >/dev/null 2>&1 || true
+    fi
+
+    return "$result"
+}
+
 list_existing_labs_for_scenario() {
     local scenario_name="$1"
-    tofu workspace list | tr -d '* ' | grep "_${scenario_name}$" || true
+    local deployment_mode="$2"
+    local expected_suffix=""
+    local workspace_name=""
+
+    expected_suffix="$(get_workspace_suffix "$scenario_name" "$deployment_mode")"
+
+    while IFS= read -r workspace_name; do
+        [[ -z "$workspace_name" || "$workspace_name" == "default" ]] && continue
+
+        if [[ "$workspace_name" == *"_${expected_suffix}" ]]; then
+            if [[ "$scenario_name" == "microcloud" && "$deployment_mode" == "full" ]] \
+                && workspace_is_legacy_microcloud_training "$workspace_name"; then
+                continue
+            fi
+            echo "$workspace_name"
+            continue
+        fi
+
+        if [[ "$scenario_name" == "microcloud" && "$deployment_mode" == "training" ]] \
+            && workspace_is_legacy_microcloud_training "$workspace_name"; then
+            echo "$workspace_name"
+        fi
+    done < <(tofu workspace list | tr -d '* ')
+}
+
+parse_workspace_metadata() {
+    local workspace_name="$1"
+    local workspace_suffix="${workspace_name#*_}"
+    local parsed_scenario=""
+    local parsed_mode="full"
+
+    if [[ "$workspace_suffix" == training-* ]]; then
+        parsed_mode="training"
+        workspace_suffix="${workspace_suffix#training-}"
+    fi
+
+    case "$workspace_suffix" in
+        microcloud|k8s-snap|k8s-juju)
+            parsed_scenario="$workspace_suffix"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    if [[ "$parsed_scenario" == "microcloud" && "$parsed_mode" == "full" ]] \
+        && workspace_is_legacy_microcloud_training "$workspace_name"; then
+        parsed_mode="training"
+    fi
+
+    printf '%s %s %s\n' "${workspace_name%_*}" "$parsed_scenario" "$parsed_mode"
 }
 
 normalize_lab_prefix_input() {
@@ -800,12 +956,32 @@ get_k8s_juju_topology_from_state() {
     echo "${cp_count} ${worker_count}"
 }
 
+get_microcloud_node_count_from_state() {
+    local workspace_name="$1"
+    local previous_workspace=""
+    local node_count="0"
+
+    previous_workspace=$(tofu workspace show 2>/dev/null || echo "default")
+    tofu workspace select "$workspace_name" >/dev/null 2>&1
+    node_count=$(tofu state list 2>/dev/null | grep -c '^lxd_instance\.microcloud_nodes\[' || true)
+    tofu workspace select "$previous_workspace" >/dev/null 2>&1
+
+    echo "$node_count"
+}
+
 destroy_environment() {
     local env_name="$1"
     local env_prefix="$2"
     local env_scenario="$3"
     local env_k8s_cp_count="${4:-3}"
     local env_k8s_worker_count="${5:-1}"
+    local env_deployment_mode="${6:-full}"
+    local env_microcloud_node_count="${7:-3}"
+    local env_microcloud_infra_only="false"
+
+    if [[ "$env_deployment_mode" == "training" ]]; then
+        env_microcloud_infra_only="true"
+    fi
 
     tofu workspace select "$env_name" >/dev/null 2>&1
 
@@ -831,6 +1007,8 @@ destroy_environment() {
 
     if [[ "$env_scenario" == "microcloud" ]]; then
         destroy_args+=(
+            -var="microcloud_node_count=${env_microcloud_node_count}"
+            -var="microcloud_infra_only=${env_microcloud_infra_only}"
             -var="microcloud_uplink_network_name=$(resolve_microcloud_uplink_network_name "$env_name")"
         )
     fi
@@ -864,15 +1042,15 @@ cleanup_microcloud_orphans() {
     uplink_network_name=$(resolve_microcloud_uplink_network_name "$env_name")
 
     # If provider state is inconsistent, these resources can remain orphaned.
-    for i in 1 2 3; do
+    for ((i = 1; i <= MICROCLOUD_MAX_NODES; i++)); do
         lxc delete -f "${lxd_prefix}-node-${i}" >/dev/null 2>&1 || true
     done
 
-    for i in 1 2 3; do
+    for ((i = 1; i <= MICROCLOUD_MAX_NODES; i++)); do
         lxc storage volume delete "$storage_pool" "${lxd_prefix}-ceph-${i}" >/dev/null 2>&1 || true
     done
 
-    for i in 1 2 3; do
+    for ((i = 1; i <= MICROCLOUD_MAX_NODES; i++)); do
         lxc storage volume delete "$storage_pool" "${lxd_prefix}-local-${i}" >/dev/null 2>&1 || true
     done
 
@@ -900,7 +1078,7 @@ reconcile_microcloud_orphans_with_state() {
         fi
     fi
 
-    for i in 0 1 2; do
+    for ((i = 0; i < MICROCLOUD_MAX_NODES; i++)); do
         local idx=$((i + 1))
         local vol_name="${lxd_prefix}-ceph-${idx}"
         local local_vol_name="${lxd_prefix}-local-${idx}"
@@ -1018,7 +1196,8 @@ print_microcloud_infra_summary() {
         return
     fi
 
-    print_section "MicroCloud Infra-Only Deployment Summary"
+    print_section "MicroCloud Training Lab Summary"
+    print_kv "Deployment type" "Training / Infrastructure Only"
     print_kv "Node count" "${#nodes[@]}"
     print_kv "MicroCloud packages" "Not installed (student task)"
     print_kv "Cluster init" "Not performed (student task)"
@@ -1031,6 +1210,123 @@ print_microcloud_infra_summary() {
         ip=$(get_node_primary_ip "$node")
         ip="${ip:-N/A}"
         printf '  %-28s %-16s %s\n' "$node" "$ip" "SSH and install MicroCloud"
+    done
+}
+
+list_training_nodes() {
+    local ws_name="$1"
+    local scenario_name="$2"
+    local lxd_prefix="${ws_name//_/-}"
+
+    case "$scenario_name" in
+        microcloud)
+            list_lxd_instances_by_prefix "${lxd_prefix}-node-"
+            ;;
+        k8s-snap)
+            list_lxd_instances_by_prefix "${lxd_prefix}-cp-"
+            list_lxd_instances_by_prefix "${lxd_prefix}-worker-"
+            ;;
+        k8s-juju)
+            if lxc info "${lxd_prefix}-ctrl" >/dev/null 2>&1; then
+                echo "${lxd_prefix}-ctrl"
+            fi
+            list_lxd_instances_by_prefix "${lxd_prefix}-cp-"
+            list_lxd_instances_by_prefix "${lxd_prefix}-worker-"
+            ;;
+    esac
+}
+
+verify_training_environment() {
+    local ws_name="$1"
+    local scenario_name="$2"
+    local node=""
+    local ip=""
+    local attempt="0"
+    local ssh_ready=false
+    local -a training_nodes=()
+
+    mapfile -t training_nodes < <(list_training_nodes "$ws_name" "$scenario_name")
+    if [[ ${#training_nodes[@]} -eq 0 ]]; then
+        log_warn "No training nodes were found after infrastructure provisioning."
+        exit 1
+    fi
+
+    print_section "Training Infrastructure Validation"
+    for node in "${training_nodes[@]}"; do
+        log_info "Waiting for cloud-init on ${node}..."
+        if ! lxc exec "$node" -- cloud-init status --wait >/dev/null; then
+            log_warn "cloud-init did not complete successfully on ${node}."
+            exit 1
+        fi
+
+        ssh_ready=false
+        for ((attempt = 1; attempt <= 24; attempt++)); do
+            ip=$(get_node_primary_ip "$node")
+            if [[ -n "$ip" ]] && ssh \
+                -i "$SSH_KEY_PATH" \
+                -o BatchMode=yes \
+                -o ConnectTimeout=5 \
+                -o IdentitiesOnly=yes \
+                -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                -o LogLevel=ERROR \
+                "ubuntu@${ip}" true; then
+                ssh_ready=true
+                break
+            fi
+            sleep 5
+        done
+
+        if [[ "$ssh_ready" != true ]]; then
+            log_warn "SSH validation failed for ${node} (${ip:-no IP})."
+            exit 1
+        fi
+        log_success "${node} is ready for training access (${ip})."
+    done
+}
+
+print_k8s_training_summary() {
+    local ws_name="$1"
+    local scenario_name="$2"
+    local lxd_prefix="${ws_name//_/-}"
+    local title=""
+    local next_step=""
+    local node=""
+    local role=""
+    local ip=""
+    local -a training_nodes=()
+
+    if [[ "$scenario_name" == "k8s-snap" ]]; then
+        title="Canonical K8s Snap Training Lab Summary"
+        next_step="Install Canonical K8s"
+    else
+        title="Canonical K8s Juju Training Lab Summary"
+        next_step="Install Juju and deploy K8s"
+    fi
+
+    mapfile -t training_nodes < <(list_training_nodes "$ws_name" "$scenario_name")
+
+    print_section "$title"
+    print_kv "Deployment type" "Training / Infrastructure Only"
+    print_kv "Node count" "${#training_nodes[@]}"
+    print_kv "Kubernetes packages" "Not installed (student task)"
+    print_kv "Cluster bootstrap" "Not performed (student task)"
+    if [[ "$scenario_name" == "k8s-juju" ]]; then
+        print_kv "Juju packages/bootstrap" "Not installed or performed (student task)"
+    fi
+    echo ""
+    printf '  %-34s %-18s %-16s %s\n' "Node" "Role" "IP" "Next Step"
+    printf '  %-34s %-18s %-16s %s\n' "----------------------------------" "------------------" "----------------" "------------------------------"
+
+    for node in "${training_nodes[@]}"; do
+        case "$node" in
+            "${lxd_prefix}-ctrl") role="Juju controller" ;;
+            *-cp-*) role="Control plane" ;;
+            *-worker-*) role="Worker" ;;
+            *) role="Training node" ;;
+        esac
+        ip=$(get_node_primary_ip "$node")
+        printf '  %-34s %-18s %-16s %s\n' "$node" "$role" "${ip:-N/A}" "$next_step"
     done
 }
 
@@ -1143,11 +1439,19 @@ ensure_tools() {
     ansible-galaxy collection install community.general >/dev/null 2>&1
 
     # Ensure Lab SSH Key exists for VM Access
+    mkdir -p "$(dirname "$SSH_KEY_PATH")"
+    chmod 0700 "$(dirname "$SSH_KEY_PATH")"
     if [ ! -f "$SSH_KEY_PATH" ]; then
         log_info "Lab SSH key not found. Generating one at $SSH_KEY_PATH..."
         ssh-keygen -t rsa -b 4096 -f "$SSH_KEY_PATH" -N "" -q
     fi
-    export TF_VAR_ssh_public_key=$(cat "${SSH_KEY_PATH}.pub")
+    if [[ ! -s "${SSH_KEY_PATH}.pub" ]]; then
+        log_info "Lab SSH public key not found. Rebuilding it from the private key..."
+        ssh-keygen -y -f "$SSH_KEY_PATH" > "${SSH_KEY_PATH}.pub"
+        chmod 0644 "${SSH_KEY_PATH}.pub"
+    fi
+    export TF_VAR_ssh_public_key
+    TF_VAR_ssh_public_key=$(cat "${SSH_KEY_PATH}.pub")
 }
 
 destroy_menu() {
@@ -1176,16 +1480,26 @@ destroy_menu() {
     echo ""
     read -p "Select the environment number to destroy: " env_idx
     
-    if [[ "$env_idx" == "0" || -z "$env_idx" || "$env_idx" -gt "${#envs[@]}" ]]; then
+    if [[ "$env_idx" == "0" || -z "$env_idx" ]]; then
         echo "Cancelled."
         exit 0
     fi
 
+    if ! [[ "$env_idx" =~ ^[0-9]+$ ]] || (( env_idx < 1 || env_idx > ${#envs[@]} )); then
+        echo "Invalid selection."
+        exit 1
+    fi
+
     selected_env=${envs[$((env_idx-1))]}
-    
-    # Extract prefix and scenario variables from the workspace name (e.g., ismail_microcloud)
-    local env_prefix="${selected_env%_*}"
-    local env_scenario="${selected_env#*_}"
+    local env_prefix=""
+    local env_scenario=""
+    local env_deployment_mode=""
+    local current_microcloud_node_count="3"
+
+    if ! read -r env_prefix env_scenario env_deployment_mode < <(parse_workspace_metadata "$selected_env"); then
+        log_warn "Workspace name is not recognized as a managed lab: ${selected_env}"
+        exit 1
+    fi
 
     log_warn "Selected environment for destruction: ${selected_env}"
     echo ""
@@ -1207,53 +1521,87 @@ destroy_menu() {
         read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_juju_topology_from_state "$selected_env")
     fi
 
+    if [[ "$env_scenario" == "microcloud" ]]; then
+        current_microcloud_node_count=$(get_microcloud_node_count_from_state "$selected_env")
+        if (( current_microcloud_node_count < 3 )); then
+            current_microcloud_node_count=3
+        fi
+    fi
+
     log_warn "Destroying environment: ${selected_env}..."
-    destroy_environment "$selected_env" "$env_prefix" "$env_scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
+    destroy_environment \
+        "$selected_env" "$env_prefix" "$env_scenario" \
+        "$current_k8s_cp_count" "$current_k8s_worker_count" \
+        "$env_deployment_mode" "$current_microcloud_node_count"
     
     log_success "Environment ${selected_env} successfully destroyed and cleaned up!"
 }
 
-clear
+main() {
+    if (( EUID == 0 )); then
+        log_warn "Do not run orchestrate.sh as root or with sudo."
+        log_warn "Run ./prep_host.sh as your regular user, refresh lxd group membership if prompted, then run ./orchestrate.sh."
+        exit 1
+    fi
+
+    cd "$SCRIPT_DIR"
+    clear
 echo -e "${CYAN}==========================================================${NC}"
 echo -e "${CYAN}         CANONICAL LAB DEPLOYMENT ENGINE                  ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 
 ensure_tools
 detect_lxd_defaults
-tofu init -input=false >/dev/null 2>&1
+if ! tofu init -input=false; then
+    log_warn "OpenTofu initialization failed. Script cannot continue."
+    log_warn "Please fix the error above and rerun ./orchestrate.sh."
+    exit 1
+fi
 
-echo ""
-echo "1) Deploy Canonical K8s (Snap)"
-echo "2) Deploy MicroCloud (3 Node MicroCloud w/ Ceph & OVN)"
-echo "3) Deploy Canonical K8s (Juju)"
-echo "4) Destroy Environments"
-echo "5) Deploy MicroCloud Infra-Only (3 Node VM Infra w/ Ceph & OVN)"
+print_section "FULL LAB DEPLOYMENTS"
+echo "  1) MicroCloud (automated deployment)"
+echo "  2) Canonical K8s - Snap (automated deployment)"
+echo "  3) Canonical K8s - Juju (automated deployment)"
+print_section "TRAINING LABS - INFRASTRUCTURE ONLY"
+echo "  4) MicroCloud Training"
+echo "  5) Canonical K8s - Snap Training"
+echo "  6) Canonical K8s - Juju Training"
+print_section "ENVIRONMENT MANAGEMENT"
+echo "  7) Destroy Environments"
+echo "  0) Exit"
 echo ""
 read -p "Select action: " action
 
-if [[ "$action" == "4" ]]; then
+if [[ "$action" == "7" ]]; then
     destroy_menu
     exit 0
 fi
 
 case $action in
-    1) scenario="k8s-snap" ;;
-    2)
+    0) echo "Cancelled."; exit 0 ;;
+    1)
         scenario="microcloud"
-        MICROCLOUD_DEPLOY_MODE="full"
+        DEPLOYMENT_MODE="full"
         ;;
-    3) scenario="k8s-juju" ;;
-    5)
+    2) scenario="k8s-snap"; DEPLOYMENT_MODE="full" ;;
+    3) scenario="k8s-juju"; DEPLOYMENT_MODE="full" ;;
+    4)
         scenario="microcloud"
-        MICROCLOUD_DEPLOY_MODE="infra-only"
+        DEPLOYMENT_MODE="training"
         ;;
+    5) scenario="k8s-snap"; DEPLOYMENT_MODE="training" ;;
+    6) scenario="k8s-juju"; DEPLOYMENT_MODE="training" ;;
     *) echo "Invalid selection."; exit 1 ;;
 esac
 
 # --- Lab selection menu ---
-mapfile -t existing_labs < <(list_existing_labs_for_scenario "$scenario")
+mapfile -t existing_labs < <(list_existing_labs_for_scenario "$scenario" "$DEPLOYMENT_MODE")
 
-print_section "Existing Labs"
+if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+    print_section "Existing Training Labs"
+else
+    print_section "Existing Full Labs"
+fi
 if [[ ${#existing_labs[@]} -eq 0 ]]; then
     echo "  No existing labs."
 else
@@ -1261,7 +1609,7 @@ else
         printf '  %-20s %s\n' "Lab" "Topology"
         printf '  %-20s %s\n' "--------------------" "--------"
         for lab in "${existing_labs[@]}"; do
-            lab_prefix="${lab%_${scenario}}"
+            lab_prefix="$(get_lab_prefix_from_workspace "$lab" "$scenario" "$DEPLOYMENT_MODE")"
             read -r _cp _w < <(get_k8s_topology_from_state "$lab")
             printf '  %-20s %s CP / %s worker\n' "$lab_prefix" "$_cp" "$_w"
         done
@@ -1269,14 +1617,15 @@ else
         printf '  %-20s %s\n' "Lab" "Topology"
         printf '  %-20s %s\n' "--------------------" "--------"
         for lab in "${existing_labs[@]}"; do
-            lab_prefix="${lab%_${scenario}}"
+            lab_prefix="$(get_lab_prefix_from_workspace "$lab" "$scenario" "$DEPLOYMENT_MODE")"
             read -r _cp _w < <(get_k8s_juju_topology_from_state "$lab")
             printf '  %-20s %s CP / %s worker\n' "$lab_prefix" "$_cp" "$_w"
         done
     else
         for lab in "${existing_labs[@]}"; do
-            lab_prefix="${lab%_${scenario}}"
-            printf '  - %s\n' "$lab_prefix"
+            lab_prefix="$(get_lab_prefix_from_workspace "$lab" "$scenario" "$DEPLOYMENT_MODE")"
+            _nodes="$(get_microcloud_node_count_from_state "$lab")"
+            printf '  - %s (%s nodes)\n' "$lab_prefix" "$_nodes"
         done
     fi
 fi
@@ -1322,6 +1671,7 @@ K8S_JUJU_WORKER_CPU=2
 K8S_JUJU_WORKER_MEMORY_GIB=4
 user_prefix=""
 workspace_name=""
+workspace_suffix="$(get_workspace_suffix "$scenario" "$DEPLOYMENT_MODE")"
 inventory_file=""
 existing_workspace=false
 
@@ -1333,7 +1683,7 @@ if [[ "$lab_intent" == "new" ]]; then
         echo "Invalid lab name. Use letters and/or numbers."
         exit 1
     fi
-    workspace_name="${user_prefix}_${scenario}"
+    workspace_name="${user_prefix}_${workspace_suffix}"
     inventory_file="inventory_${workspace_name}.yaml"
     if workspace_exists "$workspace_name"; then
         echo "A lab named '${user_prefix}' already exists. Choose 'Manage an existing lab' to work with it."
@@ -1344,7 +1694,7 @@ else
     print_section "Select a lab to manage"
     for i in "${!existing_labs[@]}"; do
         lab="${existing_labs[$i]}"
-        lab_prefix="${lab%_${scenario}}"
+        lab_prefix="$(get_lab_prefix_from_workspace "$lab" "$scenario" "$DEPLOYMENT_MODE")"
         if [[ "$scenario" == "k8s-snap" ]]; then
             read -r _cp _w < <(get_k8s_topology_from_state "$lab")
             printf '  %d) %-20s %s CP / %s worker\n' "$((i+1))" "$lab_prefix" "$_cp" "$_w"
@@ -1352,7 +1702,8 @@ else
             read -r _cp _w < <(get_k8s_juju_topology_from_state "$lab")
             printf '  %d) %-20s %s CP / %s worker\n' "$((i+1))" "$lab_prefix" "$_cp" "$_w"
         else
-            printf '  %d) %s\n' "$((i+1))" "$lab_prefix"
+            _nodes="$(get_microcloud_node_count_from_state "$lab")"
+            printf '  %d) %s (%s nodes)\n' "$((i+1))" "$lab_prefix" "$_nodes"
         fi
     done
     echo "  0) Cancel"
@@ -1365,7 +1716,7 @@ else
         echo "Invalid selection."; exit 1
     fi
     selected_lab="${existing_labs[$((lab_idx-1))]}"
-    user_prefix="${selected_lab%_${scenario}}"
+    user_prefix="$(get_lab_prefix_from_workspace "$selected_lab" "$scenario" "$DEPLOYMENT_MODE")"
     workspace_name="$selected_lab"
     inventory_file="inventory_${workspace_name}.yaml"
     existing_workspace=true
@@ -1380,12 +1731,18 @@ else
         case "$existing_lab_action" in
             add)
                 k8s_update_action="add"
-                log_info "Update mode: add nodes to existing cluster."
+                if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+                    log_info "Update mode: add nodes to existing training infrastructure."
+                else
+                    log_info "Update mode: add nodes to existing cluster."
+                fi
                 ;;
             rebuild)
                 k8s_update_action="rebuild"
                 log_warn "Rebuilding existing lab: ${workspace_name}"
-                destroy_environment "$workspace_name" "$user_prefix" "$scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
+                destroy_environment \
+                    "$workspace_name" "$user_prefix" "$scenario" \
+                    "$current_k8s_cp_count" "$current_k8s_worker_count" "$DEPLOYMENT_MODE"
                 existing_workspace=false
                 ;;
             cancel)
@@ -1410,17 +1767,25 @@ else
         case "$juju_manage_action" in
             1|"")
                 k8s_juju_update_action="add"
-                log_info "Update mode: reconcile/expand existing K8s Juju lab."
+                if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+                    log_info "Update mode: expand existing K8s Juju training infrastructure."
+                else
+                    log_info "Update mode: reconcile/expand existing K8s Juju lab."
+                fi
                 ;;
             2)
                 k8s_juju_update_action="rebuild"
                 log_warn "Rebuilding K8s Juju lab: ${workspace_name}"
-                destroy_environment "$workspace_name" "$user_prefix" "$scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
+                destroy_environment \
+                    "$workspace_name" "$user_prefix" "$scenario" \
+                    "$current_k8s_cp_count" "$current_k8s_worker_count" "$DEPLOYMENT_MODE"
                 existing_workspace=false
                 ;;
             3)
                 log_warn "Deleting K8s Juju lab: ${workspace_name}"
-                destroy_environment "$workspace_name" "$user_prefix" "$scenario" "$current_k8s_cp_count" "$current_k8s_worker_count"
+                destroy_environment \
+                    "$workspace_name" "$user_prefix" "$scenario" \
+                    "$current_k8s_cp_count" "$current_k8s_worker_count" "$DEPLOYMENT_MODE"
                 log_success "K8s Juju lab deleted."
                 exit 0
                 ;;
@@ -1433,7 +1798,12 @@ else
         esac
     else
         # MicroCloud manage menu
+        current_microcloud_node_count=$(get_microcloud_node_count_from_state "$workspace_name")
+        if (( current_microcloud_node_count < 3 )); then
+            current_microcloud_node_count=3
+        fi
         print_section "Managing: ${user_prefix} (MicroCloud)"
+        print_kv "Current topology" "${current_microcloud_node_count} nodes"
         echo ""
         echo "  1) Rebuild  (destroy and redeploy from scratch)"
         echo "  2) Delete lab and exit"
@@ -1443,12 +1813,16 @@ else
         case "$mc_manage_action" in
             1)
                 log_warn "Rebuilding MicroCloud lab: ${workspace_name}"
-                destroy_environment "$workspace_name" "$user_prefix" "$scenario"
+                destroy_environment \
+                    "$workspace_name" "$user_prefix" "$scenario" \
+                    3 1 "$DEPLOYMENT_MODE" "$current_microcloud_node_count"
                 existing_workspace=false
                 ;;
             2)
                 log_warn "Deleting MicroCloud lab: ${workspace_name}"
-                destroy_environment "$workspace_name" "$user_prefix" "$scenario"
+                destroy_environment \
+                    "$workspace_name" "$user_prefix" "$scenario" \
+                    3 1 "$DEPLOYMENT_MODE" "$current_microcloud_node_count"
                 log_success "MicroCloud lab deleted."
                 exit 0
                 ;;
@@ -1493,7 +1867,11 @@ if [[ "$scenario" == "k8s-snap" ]]; then
         fi
 
         if [[ "$k8s_control_plane_count" == "$current_k8s_cp_count" && "$k8s_worker_count" == "$current_k8s_worker_count" ]]; then
-            log_info "Topology is unchanged. The existing lab will be checked and reconciled in place."
+            if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+                log_info "Topology is unchanged. The training infrastructure will be validated in place."
+            else
+                log_info "Topology is unchanged. The existing lab will be checked and reconciled in place."
+            fi
         else
             log_info "The existing lab will be expanded in place."
         fi
@@ -1531,7 +1909,17 @@ if [[ "$scenario" == "k8s-snap" ]]; then
 fi
 
 if [[ "$scenario" == "microcloud" ]]; then
-    configure_microcloud_sizing
+    echo ""
+    read -p "MicroCloud node count [default: 3, allowed: 3-${MICROCLOUD_MAX_NODES}]: " microcloud_node_count_input
+    MICROCLOUD_NODE_COUNT="${microcloud_node_count_input:-3}"
+
+    if ! [[ "$MICROCLOUD_NODE_COUNT" =~ ^[0-9]+$ ]] \
+        || (( MICROCLOUD_NODE_COUNT < 3 || MICROCLOUD_NODE_COUNT > MICROCLOUD_MAX_NODES )); then
+        echo "Invalid MicroCloud node count. Enter a value from 3 to ${MICROCLOUD_MAX_NODES}."
+        exit 1
+    fi
+
+    configure_microcloud_sizing "$MICROCLOUD_NODE_COUNT"
 fi
 
 if [[ "$scenario" == "k8s-juju" ]]; then
@@ -1577,7 +1965,11 @@ if [[ "$scenario" == "k8s-juju" ]]; then
 
     if [[ "$existing_workspace" == true && "$k8s_juju_update_action" == "add" ]]; then
         if [[ "$k8s_juju_cp_count" == "$current_k8s_cp_count" && "$k8s_juju_worker_count" == "$current_k8s_worker_count" ]]; then
-            log_info "Topology is unchanged. The existing K8s Juju lab will be reconciled in place."
+            if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+                log_info "Topology is unchanged. The K8s Juju training infrastructure will be validated in place."
+            else
+                log_info "Topology is unchanged. The existing K8s Juju lab will be reconciled in place."
+            fi
         else
             log_info "The existing K8s Juju lab will be expanded in place."
         fi
@@ -1606,7 +1998,7 @@ if [[ "$scenario" == "microcloud" ]]; then
 fi
 
 MICROCLOUD_INFRA_ONLY_TF="false"
-if [[ "$scenario" == "microcloud" && "$MICROCLOUD_DEPLOY_MODE" == "infra-only" ]]; then
+if [[ "$scenario" == "microcloud" && "$DEPLOYMENT_MODE" == "training" ]]; then
     MICROCLOUD_INFRA_ONLY_TF="true"
 fi
 
@@ -1641,6 +2033,7 @@ elif [[ "$scenario" == "microcloud" ]]; then
     # Work around intermittent terraform-lxd provider state race during
     # concurrent volume creation by applying MicroCloud resources serially.
     tofu_apply_args+=(
+        -var="microcloud_node_count=${MICROCLOUD_NODE_COUNT}"
         -var="microcloud_node_cpu=${MICROCLOUD_NODE_CPU}"
         -var="microcloud_node_memory_mb=${MICROCLOUD_NODE_MEMORY_MB}"
         -var="microcloud_root_disk_size_gib=${MICROCLOUD_ROOT_DISK_GIB}"
@@ -1650,6 +2043,8 @@ elif [[ "$scenario" == "microcloud" ]]; then
         -var="microcloud_uplink_network_name=${MICROCLOUD_UPLINK_NETWORK_NAME}"
         -parallelism=1
     )
+    log_info "MicroCloud topology: ${MICROCLOUD_NODE_COUNT} node(s), deployment mode=${DEPLOYMENT_MODE}"
+    log_info "MicroCloud sizing: ${MICROCLOUD_NODE_CPU}vCPU/$((MICROCLOUD_NODE_MEMORY_MB / 1024))GB per node"
 elif [[ "$scenario" == "k8s-juju" ]]; then
     tofu_apply_args+=(
         -var="k8s_juju_cp_count=${k8s_juju_cp_count}"
@@ -1666,16 +2061,24 @@ fi
 tofu apply "${tofu_apply_args[@]}"
 
 if [[ "$scenario" == "k8s-snap" ]]; then
-    log_info "Running Ansible Orchestration for K8s..."
-    ansible-playbook -i "$inventory_file" playbooks/k8s_snap.yml
-    log_success "K8s Lab Deployed Successfully!"
-    print_k8s_summary "$workspace_name"
+    if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+        log_info "Skipping Canonical K8s installation and cluster bootstrap (training mode)..."
+        verify_training_environment "$workspace_name" "$scenario"
+        log_success "Canonical K8s Snap Training Lab Deployed Successfully!"
+        print_k8s_training_summary "$workspace_name" "$scenario"
+    else
+        log_info "Running Ansible Orchestration for K8s..."
+        ansible-playbook -i "$inventory_file" playbooks/k8s_snap.yml
+        log_success "K8s Lab Deployed Successfully!"
+        print_k8s_summary "$workspace_name"
+    fi
     print_section "Access"
     print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
 elif [[ "$scenario" == "microcloud" ]]; then
-    if [[ "$MICROCLOUD_DEPLOY_MODE" == "infra-only" ]]; then
-        log_info "Skipping MicroCloud package installation and cluster bootstrap (infra-only mode)..."
-        log_success "MicroCloud Infra-Only Lab Deployed Successfully!"
+    if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+        log_info "Skipping MicroCloud package installation and cluster bootstrap (training mode)..."
+        verify_training_environment "$workspace_name" "$scenario"
+        log_success "MicroCloud Training Lab Deployed Successfully!"
         print_microcloud_infra_summary "$workspace_name"
     else
         log_info "Running Ansible Orchestration for MicroCloud..."
@@ -1688,11 +2091,26 @@ elif [[ "$scenario" == "microcloud" ]]; then
 fi
 
 if [[ "$scenario" == "k8s-juju" ]]; then
-    log_info "Running Ansible Orchestration for K8s (Juju)..."
-    ansible-playbook -i "$inventory_file" playbooks/k8s_juju.yml
-    log_success "K8s Juju Lab Deployed Successfully!"
-    print_k8s_juju_summary "$workspace_name"
+    if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+        log_info "Skipping Juju and Canonical K8s installation/bootstrap (training mode)..."
+        verify_training_environment "$workspace_name" "$scenario"
+        log_success "Canonical K8s Juju Training Lab Deployed Successfully!"
+        print_k8s_training_summary "$workspace_name" "$scenario"
+    else
+        log_info "Running Ansible Orchestration for K8s (Juju)..."
+        ansible-playbook -i "$inventory_file" playbooks/k8s_juju.yml
+        log_success "K8s Juju Lab Deployed Successfully!"
+        print_k8s_juju_summary "$workspace_name"
+    fi
     print_section "Access"
     print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
-    print_kv "Kubeconfig" "lxc exec <prefix>-ctrl -- sudo -u ubuntu -H juju run k8s/leader get-kubeconfig -m lab-controller:k8s-lab"
+    if [[ "$DEPLOYMENT_MODE" == "full" ]]; then
+        print_kv "Kubeconfig" "lxc exec <prefix>-ctrl -- sudo -u ubuntu -H juju run k8s/leader get-kubeconfig -m lab-controller:k8s-lab"
+    fi
+fi
+
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
