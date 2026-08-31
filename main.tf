@@ -245,6 +245,67 @@ variable "microcloud_uplink_network_name" {
   default     = ""
 }
 
+variable "microcloud_network_mode" {
+  description = "MicroCloud network layout: standard-2nic or fully-segregated-4nic"
+  type        = string
+  default     = "standard-2nic"
+
+  validation {
+    condition     = contains(["standard-2nic", "fully-segregated-4nic"], var.microcloud_network_mode)
+    error_message = "microcloud_network_mode must be standard-2nic or fully-segregated-4nic."
+  }
+}
+
+variable "microcloud_ovn_underlay_network_name" {
+  description = "LXD bridge network name used for the dedicated OVN underlay"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.microcloud_network_mode == "standard-2nic" || var.microcloud_ovn_underlay_network_name != ""
+    error_message = "microcloud_ovn_underlay_network_name is required in fully-segregated-4nic mode."
+  }
+}
+
+variable "microcloud_ceph_network_name" {
+  description = "LXD bridge network name used for Ceph public and cluster traffic"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.microcloud_network_mode == "standard-2nic" || var.microcloud_ceph_network_name != ""
+    error_message = "microcloud_ceph_network_name is required in fully-segregated-4nic mode."
+  }
+}
+
+variable "microcloud_ovn_underlay_cidr" {
+  description = "IPv4 CIDR used by the dedicated OVN underlay"
+  type        = string
+  default     = ""
+
+  validation {
+    condition = (
+      var.microcloud_network_mode == "standard-2nic" ||
+      can(cidrhost(var.microcloud_ovn_underlay_cidr, var.microcloud_node_count + 9))
+    )
+    error_message = "microcloud_ovn_underlay_cidr must provide an address for every MicroCloud node."
+  }
+}
+
+variable "microcloud_ceph_general_cidr" {
+  description = "IPv4 CIDR used by all Ceph public/client and internal/replication traffic"
+  type        = string
+  default     = ""
+
+  validation {
+    condition = (
+      var.microcloud_network_mode == "standard-2nic" ||
+      can(cidrhost(var.microcloud_ceph_general_cidr, var.microcloud_node_count + 9))
+    )
+    error_message = "microcloud_ceph_general_cidr must provide an address for every MicroCloud node."
+  }
+}
+
 variable "microcloud_local_disk_size_gib" {
   description = "Local storage disk size in GiB per MicroCloud training node"
   type        = number
@@ -269,6 +330,17 @@ locals {
   # LXD safe prefix: Replaces underscores with hyphens to strictly comply with LXD naming rules
   # (e.g., "ismail_microcloud" becomes "ismail-microcloud")
   lxd_prefix = replace(local.env_id, "_", "-")
+
+  microcloud_nic_planes = ["mgmt0", "ovn-uplink", "ovn-underlay", "ceph-general"]
+  microcloud_macs = [
+    for node_index in range(var.microcloud_node_count) : {
+      for plane in local.microcloud_nic_planes :
+      plane => join(":", concat(
+        ["02", "00"],
+        regexall("..", substr(md5("${local.env_id}-${node_index + 1}-${plane}"), 0, 8))
+      ))
+    }
+  ]
 }
 
 resource "lxd_profile" "lab_base" {
@@ -329,12 +401,46 @@ resource "lxd_instance" "microcloud_nodes" {
     memory = "${var.microcloud_node_memory_mb}MiB"
   }
 
-  # Second Network Interface (MicroOVN)
+  # Second Network Interface (MicroOVN external uplink)
   device {
     name = "eth1"
     type = "nic"
     properties = {
       network = var.microcloud_uplink_network_name
+      hwaddr  = local.microcloud_macs[count.index]["ovn-uplink"]
+    }
+  }
+
+  device {
+    name = "eth0"
+    type = "nic"
+    properties = {
+      network = var.lxd_network_name
+      hwaddr  = local.microcloud_macs[count.index]["mgmt0"]
+    }
+  }
+
+  dynamic "device" {
+    for_each = var.microcloud_network_mode == "fully-segregated-4nic" ? [1] : []
+    content {
+      name = "eth2"
+      type = "nic"
+      properties = {
+        network = var.microcloud_ovn_underlay_network_name
+        hwaddr  = local.microcloud_macs[count.index]["ovn-underlay"]
+      }
+    }
+  }
+
+  dynamic "device" {
+    for_each = var.microcloud_network_mode == "fully-segregated-4nic" ? [1] : []
+    content {
+      name = "eth3"
+      type = "nic"
+      properties = {
+        network = var.microcloud_ceph_network_name
+        hwaddr  = local.microcloud_macs[count.index]["ceph-general"]
+      }
     }
   }
 
@@ -368,6 +474,68 @@ resource "lxd_instance" "microcloud_nodes" {
       ssh_authorized_keys:
         - ${var.ssh_public_key}
     EOT
+    "cloud-init.network-config" = yamlencode({
+      version = 2
+      ethernets = merge(
+        {
+          mgmt0 = merge(
+            {
+              match = {
+                macaddress = local.microcloud_macs[count.index]["mgmt0"]
+              }
+              dhcp4 = true
+              dhcp6 = false
+            },
+            var.microcloud_network_mode == "fully-segregated-4nic" ? {
+              set-name = "mgmt0"
+            } : {}
+          )
+          ovn-uplink = merge(
+            {
+              match = {
+                macaddress = local.microcloud_macs[count.index]["ovn-uplink"]
+              }
+              dhcp4      = false
+              dhcp6      = false
+              accept-ra  = false
+              link-local = []
+              optional   = true
+            },
+            var.microcloud_network_mode == "fully-segregated-4nic" ? {
+              set-name = "ovn-uplink"
+            } : {}
+          )
+        },
+        var.microcloud_network_mode == "fully-segregated-4nic" ? {
+          ovn-underlay = {
+            match = {
+              macaddress = local.microcloud_macs[count.index]["ovn-underlay"]
+            }
+            set-name   = "ovn-underlay"
+            dhcp4      = false
+            dhcp6      = false
+            accept-ra  = false
+            link-local = []
+            addresses = [
+              "${cidrhost(var.microcloud_ovn_underlay_cidr, count.index + 10)}/${split("/", var.microcloud_ovn_underlay_cidr)[1]}"
+            ]
+          }
+          ceph-general = {
+            match = {
+              macaddress = local.microcloud_macs[count.index]["ceph-general"]
+            }
+            set-name   = "ceph-general"
+            dhcp4      = false
+            dhcp6      = false
+            accept-ra  = false
+            link-local = []
+            addresses = [
+              "${cidrhost(var.microcloud_ceph_general_cidr, count.index + 10)}/${split("/", var.microcloud_ceph_general_cidr)[1]}"
+            ]
+          }
+        } : {}
+      )
+    })
   }
 }
 
@@ -485,7 +653,19 @@ resource "local_file" "ansible_inventory" {
     all = {
       children = {
         microcloud = {
-          hosts = { for name in lxd_instance.microcloud_nodes[*].name : name => { ansible_connection = "lxd" } }
+          hosts = {
+            for index, name in lxd_instance.microcloud_nodes[*].name : name => {
+              ansible_connection         = "lxd"
+              microcloud_network_mode    = var.microcloud_network_mode
+              microcloud_ovn_underlay_ip = var.microcloud_network_mode == "fully-segregated-4nic" ? cidrhost(var.microcloud_ovn_underlay_cidr, index + 10) : ""
+              microcloud_ceph_general_ip = var.microcloud_network_mode == "fully-segregated-4nic" ? cidrhost(var.microcloud_ceph_general_cidr, index + 10) : ""
+            }
+          }
+          vars = {
+            microcloud_network_mode      = var.microcloud_network_mode
+            microcloud_ovn_underlay_cidr = var.microcloud_ovn_underlay_cidr
+            microcloud_ceph_general_cidr = var.microcloud_ceph_general_cidr
+          }
         }
         k8s_snap = {
           hosts = merge(

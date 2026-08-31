@@ -159,14 +159,28 @@ For a new or rebuilt MicroCloud lab, choose between `3` and `10` nodes:
 - MicroCeph enabled
 - MicroOVN enabled
 
-The node count can be selected for full and training labs. Changing the node count of an existing MicroCloud lab requires a rebuild.
+The node count can be selected for full and training labs. Changing the node count or network mode of an existing MicroCloud lab requires a rebuild.
 
-The existing two-interface network model is unchanged:
+After selecting the node count, choose one of two network modes:
 
-- `eth0`: management, SSH, and cluster communication
-- `eth1`: dedicated IP-free MicroOVN uplink
+- `Standard - 2 NICs` (default, backward-compatible):
+  - `eth0`: management, SSH, and cluster communication
+  - `eth1`: dedicated IP-free MicroOVN external uplink, configured UP at boot
+- `Fully Segregated - 4 NICs (Dedicated OVN and Ceph Planes)`:
+  - `mgmt0`: SSH plus MicroCloud and LXD management/cluster communication
+  - `ovn-uplink`: dedicated IP-free external OVN uplink
+  - `ovn-underlay`: persistent static addressing for OVN Geneve encapsulation
+  - `ceph-general`: persistent static addressing for both Ceph public/client and internal/replication traffic
 
-Separate Ceph and OVN underlay networks are not configured by this version.
+The four-NIC mode proposes deterministic per-lab `/24` CIDRs, which can be overridden during creation or rebuild. Provisioning stops if either CIDR overlaps a host route, an LXD managed subnet, or the other selected plane. The dedicated addresses are written through cloud-init network configuration and survive reboots.
+
+Both network modes use MAC-matched cloud-init network configuration. The OVN uplink is brought UP without DHCP, router advertisements, or IPv4/IPv6 link-local addressing, so it remains IP-free across reboots.
+
+Before MicroCloud installation, every Standard node is checked for an UP, IP-free uplink and a management default route. Every four-NIC node is additionally checked for the expected addresses, plane-specific routes, and all-to-all OVN/Ceph connectivity. After bootstrap, the automation verifies that every OVN encapsulation address uses `ovn-underlay` and that both Ceph `public_network` and `cluster_network` use the `ceph-general` CIDR.
+
+Training mode creates and validates the same selected NIC layout and SSH access, but still skips package installation and MicroCloud preseed/bootstrap.
+
+Lab-created LXD networks carry ownership and role tags. Cleanup removes only networks whose ownership tag matches the selected workspace; unowned or ambiguous networks are left untouched.
 
 ### MicroCloud Sizing Profiles
 

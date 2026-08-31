@@ -42,7 +42,7 @@
       when: item.rc != 0
       changed_when: true
 
-    - name: Detect OVN uplink interface (no IP assigned, not lo, not primary)
+    - name: Detect Standard mode OVN uplink interface
       # MicroCloud OVN requires a dedicated interface with no IP address.
       # We find the first interface that has no IPv4 address and is not lo or
       # the primary (default-route) interface — portable across any LXD VM shape.
@@ -54,6 +54,56 @@
         done
       register: ovn_iface_detect
       changed_when: false
+      when: microcloud_network_mode | default('standard-2nic') == 'standard-2nic'
+
+    - name: Verify fully segregated interfaces exist
+      command: ip link show dev {{ item }}
+      loop:
+        - mgmt0
+        - ovn-uplink
+        - ovn-underlay
+        - ceph-general
+      changed_when: false
+      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+
+    - name: Read fully segregated OVN uplink addresses
+      command: ip -o address show dev ovn-uplink
+      register: ovn_uplink_addresses
+      changed_when: false
+      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+
+    - name: Fail if fully segregated OVN uplink has an IPv4 address
+      fail:
+        msg: >
+          The dedicated OVN uplink on {{ inventory_hostname }} must not have an
+          IP address, but found: {{ ovn_uplink_addresses.stdout }}
+      when:
+        - microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+        - ovn_uplink_addresses.stdout | trim != ''
+
+    - name: Read fully segregated plane addresses
+      shell: ip -4 -o address show dev {{ item.interface }} scope global | awk '{split($4, address, "/"); print address[1]; exit}'
+      loop:
+        - { interface: 'ovn-underlay', address: "{{ microcloud_ovn_underlay_ip }}" }
+        - { interface: 'ceph-general', address: "{{ microcloud_ceph_general_ip }}" }
+      loop_control:
+        label: "{{ item.interface }}"
+      register: segregated_plane_addresses
+      changed_when: false
+      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+
+    - name: Fail if fully segregated plane addresses do not match inventory
+      fail:
+        msg: >
+          {{ item.item.interface }} on {{ inventory_hostname }} has
+          {{ item.stdout | trim | default('no IPv4 address', true) }};
+          expected {{ item.item.address }}.
+      loop: "{{ segregated_plane_addresses.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.interface }}"
+      when:
+        - microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+        - item.stdout | trim != item.item.address
 
     - name: Detect available Ceph disk path (non-root, unmounted)
       shell: |
@@ -79,7 +129,9 @@
           Could not find a network interface without an IPv4 address for use as
           the OVN uplink on {{ inventory_hostname }}. Ensure each node has a
           dedicated NIC with no IP assigned.
-      when: ovn_iface_detect.stdout | trim == ""
+      when:
+        - microcloud_network_mode | default('standard-2nic') == 'standard-2nic'
+        - ovn_iface_detect.stdout | trim == ""
 
     - name: Fail if no non-root disk is available for Ceph
       fail:
@@ -88,9 +140,15 @@
           {{ inventory_hostname }}. Ensure each MicroCloud node has an extra disk attached.
       when: ceph_disk_detect.stdout | trim == ""
 
-    - name: Set OVN uplink interface fact
+    - name: Set Standard mode OVN uplink interface fact
       set_fact:
         ovn_uplink_iface: "{{ ovn_iface_detect.stdout | trim }}"
+      when: microcloud_network_mode | default('standard-2nic') == 'standard-2nic'
+
+    - name: Set fully segregated OVN uplink interface fact
+      set_fact:
+        ovn_uplink_iface: ovn-uplink
+      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
 
     - name: Set Ceph disk path fact
       set_fact:
@@ -143,6 +201,9 @@
           {% for host in groups['microcloud'] %}
             - name: {{ host }}
               ovn_uplink_interface: {{ hostvars[host].ovn_uplink_iface }}
+          {% if microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic' %}
+              ovn_underlay_ip: {{ hostvars[host].microcloud_ovn_underlay_ip }}
+          {% endif %}
               storage:
                 ceph:
                   - path: {{ hostvars[host].ceph_disk_path }}
@@ -153,7 +214,12 @@
             ipv4_range: {{ ovn_ipv4_range }}
             dns_servers: 8.8.8.8
           ceph:
+          {% if microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic' %}
+            public_network: {{ microcloud_ceph_general_cidr }}
+            internal_network: {{ microcloud_ceph_general_cidr }}
+          {% else %}
             internal_network: {{ lookup_subnet }}
+          {% endif %}
 
     - name: Read preseed file content for stdin
       slurp:
@@ -253,3 +319,42 @@
       command: microcloud cluster list
       register: cluster_list
       changed_when: false
+
+    - name: Read OVN encapsulation addresses
+      command: microovn.ovn-sbctl --columns=ip list Encap
+      register: ovn_encapsulation
+      changed_when: false
+      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+
+    - name: Verify every node uses its dedicated OVN underlay address
+      assert:
+        that:
+          - hostvars[item].microcloud_ovn_underlay_ip in ovn_encapsulation.stdout
+        fail_msg: >-
+          OVN encapsulation address {{ hostvars[item].microcloud_ovn_underlay_ip }}
+          for {{ item }} was not found.
+      loop: "{{ groups['microcloud'] }}"
+      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+
+    - name: Read Ceph public network
+      command: microceph.ceph config get global public_network
+      register: ceph_public_network
+      changed_when: false
+      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+
+    - name: Read Ceph cluster network
+      command: microceph.ceph config get global cluster_network
+      register: ceph_cluster_network
+      changed_when: false
+      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+
+    - name: Verify Ceph public and cluster networks use ceph-general
+      assert:
+        that:
+          - ceph_public_network.stdout | trim == microcloud_ceph_general_cidr
+          - ceph_cluster_network.stdout | trim == microcloud_ceph_general_cidr
+        fail_msg: >-
+          Ceph networks do not match {{ microcloud_ceph_general_cidr }}:
+          public={{ ceph_public_network.stdout | trim }},
+          cluster={{ ceph_cluster_network.stdout | trim }}.
+      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
