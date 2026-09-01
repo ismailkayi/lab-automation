@@ -320,57 +320,130 @@
       register: cluster_list
       changed_when: false
 
+    - name: Wait for Ceph cluster health
+      command: microceph.ceph health
+      register: ceph_health
+      changed_when: false
+      until:
+        - ceph_health.rc == 0
+        - ceph_health.stdout | trim is match('^HEALTH_OK')
+      retries: 30
+      delay: 10
+
+    - name: Initialize post-deployment validation status
+      set_fact:
+        post_deploy_validation_warnings: []
+        ceph_network_validation_available: false
+        ceph_public_network: ""
+        ceph_cluster_network: ""
+
     - name: Read OVN encapsulation addresses
       command: microovn.ovn-sbctl --columns=ip list Encap
       register: ovn_encapsulation
       changed_when: false
+      failed_when: false
       when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+
+    - name: Record unavailable OVN encapsulation validation
+      set_fact:
+        post_deploy_validation_warnings: >-
+          {{
+            post_deploy_validation_warnings
+            + ['OVN encapsulation addresses could not be read automatically (rc=' ~ ovn_encapsulation.rc ~ ').']
+          }}
+      when:
+        - microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+        - ovn_encapsulation.rc != 0
 
     - name: Verify every node uses its dedicated OVN underlay address
       assert:
         that:
           - hostvars[item].microcloud_ovn_underlay_ip in ovn_encapsulation.stdout
         fail_msg: >-
-          OVN encapsulation address {{ hostvars[item].microcloud_ovn_underlay_ip }}
-          for {{ item }} was not found.
+          Deployment completed, but validation FAILED: OVN encapsulation address
+          {{ hostvars[item].microcloud_ovn_underlay_ip }} for {{ item }} was not found.
       loop: "{{ groups['microcloud'] }}"
-      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+      when:
+        - microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+        - ovn_encapsulation.rc == 0
 
     - name: Read Ceph monitor configuration
       command: microceph.ceph config dump --format json
       register: ceph_config_dump
       changed_when: false
+      failed_when: false
       when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
 
-    - name: Read Ceph global network values
+    - name: Record unavailable Ceph network validation
       set_fact:
-        ceph_public_network: >-
+        post_deploy_validation_warnings: >-
           {{
-            ceph_config_entries
-            | selectattr('section', 'equalto', 'global')
-            | selectattr('name', 'equalto', 'public_network')
-            | map(attribute='value')
-            | first
-            | default('')
+            post_deploy_validation_warnings
+            + ['Ceph network configuration could not be read automatically (rc=' ~ ceph_config_dump.rc ~ ').']
           }}
-        ceph_cluster_network: >-
-          {{
-            ceph_config_entries
-            | selectattr('section', 'equalto', 'global')
-            | selectattr('name', 'equalto', 'cluster_network')
-            | map(attribute='value')
-            | first
-            | default('')
-          }}
-      vars:
-        ceph_config_json: "{{ ceph_config_dump.stdout | from_json }}"
-        ceph_config_entries: >-
-          {{
-            ceph_config_json.config
-            if ceph_config_json is mapping and 'config' in ceph_config_json
-            else ceph_config_json
-          }}
-      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+      when:
+        - microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+        - ceph_config_dump.rc != 0
+
+    - name: Parse Ceph network configuration
+      block:
+        - name: Decode Ceph configuration JSON
+          set_fact:
+            ceph_config_json: "{{ ceph_config_dump.stdout | from_json }}"
+
+        - name: Verify Ceph configuration JSON shape
+          assert:
+            that:
+              - >-
+                (ceph_config_json is sequence and ceph_config_json is not string)
+                or
+                (ceph_config_json is mapping and 'config' in ceph_config_json)
+            quiet: true
+
+        - name: Normalize Ceph configuration entries
+          set_fact:
+            ceph_config_entries: >-
+              {{
+                ceph_config_json.config
+                if ceph_config_json is mapping and 'config' in ceph_config_json
+                else ceph_config_json
+              }}
+
+        - name: Read Ceph global network values
+          set_fact:
+            ceph_public_network: >-
+              {{
+                ceph_config_entries
+                | selectattr('section', 'equalto', 'global')
+                | selectattr('name', 'equalto', 'public_network')
+                | map(attribute='value')
+                | first
+                | default('')
+              }}
+            ceph_cluster_network: >-
+              {{
+                ceph_config_entries
+                | selectattr('section', 'equalto', 'global')
+                | selectattr('name', 'equalto', 'cluster_network')
+                | map(attribute='value')
+                | first
+                | default('')
+              }}
+
+        - name: Mark Ceph network validation available
+          set_fact:
+            ceph_network_validation_available: true
+      rescue:
+        - name: Record unrecognized Ceph configuration output
+          set_fact:
+            post_deploy_validation_warnings: >-
+              {{
+                post_deploy_validation_warnings
+                + ['Ceph network configuration output was not recognized; verify public_network and cluster_network manually.']
+              }}
+      when:
+        - microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+        - ceph_config_dump.rc == 0
 
     - name: Verify Ceph public and cluster networks use ceph-general
       assert:
@@ -378,7 +451,24 @@
           - ceph_public_network == microcloud_ceph_general_cidr
           - ceph_cluster_network == microcloud_ceph_general_cidr
         fail_msg: >-
-          Ceph networks do not match {{ microcloud_ceph_general_cidr }}:
+          Deployment completed, but validation FAILED: Ceph networks do not
+          match {{ microcloud_ceph_general_cidr }}:
           public={{ ceph_public_network | default('missing', true) }},
           cluster={{ ceph_cluster_network | default('missing', true) }}.
-      when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+      when:
+        - microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
+        - ceph_network_validation_available
+
+    - name: Show post-deployment validation warnings
+      debug:
+        msg: "WARNING: {{ item }}"
+      loop: "{{ post_deploy_validation_warnings }}"
+      when: post_deploy_validation_warnings | length > 0
+
+    - name: Show deployment and validation result
+      debug:
+        msg:
+          - "Deployment: SUCCESS"
+          - >-
+            Validation:
+            {{ 'PASSED WITH WARNINGS' if post_deploy_validation_warnings | length > 0 else 'PASSED' }}

@@ -178,6 +178,8 @@ Both network modes use MAC-matched cloud-init network configuration. The OVN upl
 
 Before MicroCloud installation, every Standard node is checked for an UP, IP-free uplink and a management default route. Every four-NIC node is additionally checked for the expected addresses, plane-specific routes, and all-to-all OVN/Ceph connectivity. After bootstrap, the automation verifies that every OVN encapsulation address uses `ovn-underlay` and that both Ceph `public_network` and `cluster_network` use the `ceph-general` CIDR.
 
+Post-deployment validation distinguishes confirmed configuration errors from version-specific introspection limitations. A successfully read OVN or Ceph configuration that does not match the selected network plan fails validation. If a supported health check passes but an introspection command is unavailable or returns an unknown format, deployment completes with `Validation: PASSED WITH WARNINGS` and requests manual verification.
+
 Training mode creates and validates the same selected NIC layout and SSH access, but still skips package installation and MicroCloud preseed/bootstrap.
 
 Lab-created LXD networks carry ownership and role tags. Cleanup removes only networks whose ownership tag matches the selected workspace; unowned or ambiguous networks are left untouched.
