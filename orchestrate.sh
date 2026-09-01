@@ -986,6 +986,25 @@ workspace_exists() {
     tofu workspace list | tr -d '* ' | grep -qx "$workspace_name"
 }
 
+delete_tofu_workspace() {
+    local workspace_name="$1"
+
+    if ! tofu workspace select default >/dev/null 2>&1; then
+        log_warn "Could not switch to default workspace before deleting ${workspace_name}."
+        return 1
+    fi
+
+    if ! tofu workspace delete -force "$workspace_name" >/dev/null 2>&1; then
+        log_warn "Could not delete workspace ${workspace_name}. It may still contain state entries."
+        return 1
+    fi
+
+    if workspace_exists "$workspace_name"; then
+        log_warn "Workspace ${workspace_name} still exists after the delete command completed."
+        return 1
+    fi
+}
+
 get_workspace_suffix() {
     local scenario_name="$1"
     local deployment_mode="$2"
@@ -1245,13 +1264,8 @@ destroy_environment() {
         cleanup_microcloud_orphans "$env_name"
     fi
 
-    if ! tofu workspace select default >/dev/null 2>&1; then
-        log_warn "Could not switch to default workspace before deleting ${env_name}."
-        return
-    fi
-
-    if ! tofu workspace delete -force "$env_name" >/dev/null 2>&1; then
-        log_warn "Could not delete workspace ${env_name}. It may still contain state entries."
+    if ! delete_tofu_workspace "$env_name"; then
+        return 1
     fi
 
     rm -f "inventory_${env_name}.yaml"
@@ -1504,11 +1518,14 @@ delete_owned_microcloud_network() {
     local env_name="$2"
     local owner=""
 
-    lxc network show "$network_name" >/dev/null 2>&1 || return
+    if ! lxc network show "$network_name" >/dev/null 2>&1; then
+        return 0
+    fi
+
     owner=$(lxc network get "$network_name" user.lab-automation.owner 2>/dev/null || true)
     if [[ "$owner" != "$env_name" ]]; then
         log_warn "Skipping network cleanup for ${network_name}: owner is ${owner:-unset}, expected ${env_name}."
-        return
+        return 0
     fi
 
     if lxc network delete "$network_name" >/dev/null 2>&1; then
@@ -1516,6 +1533,8 @@ delete_owned_microcloud_network() {
     else
         log_warn "Could not remove owned MicroCloud network ${network_name}; check whether it is still in use."
     fi
+
+    return 0
 }
 
 microcloud_network_mode_label() {

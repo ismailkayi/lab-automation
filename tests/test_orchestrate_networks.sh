@@ -67,6 +67,7 @@ assert_equal "${uplink_name%-up}-ce" "$ceph_name" "Ceph network name"
 
 deleted_network=""
 mock_owner="another_workspace"
+mock_network_exists=true
 lxc() {
     if [[ "$1 $2 $3" == "config device get" ]]; then
         if [[ "$5" == "eth1" && "$6" == "hwaddr" ]]; then
@@ -82,7 +83,8 @@ EOF
         return 0
     fi
     if [[ "$1 $2" == "network show" ]]; then
-        return 0
+        [[ "$mock_network_exists" == true ]]
+        return
     fi
     if [[ "$1 $2" == "network get" ]]; then
         echo "$mock_owner"
@@ -97,11 +99,60 @@ EOF
 
 assert_equal "enp6s0" "$(get_guest_interface_for_device "demo-node-1" "eth1")" "guest interface MAC mapping"
 
+mock_network_exists=false
+delete_owned_microcloud_network "mc-missing-up" "demo_workspace" >/dev/null \
+    || fail "a missing network must be a successful cleanup no-op"
+assert_equal "" "$deleted_network" "missing network cleanup"
+
+mock_network_exists=true
 delete_owned_microcloud_network "mc-demo-test-up" "demo_workspace" >/dev/null
 assert_equal "" "$deleted_network" "unowned network cleanup"
 
 mock_owner="demo_workspace"
 delete_owned_microcloud_network "mc-demo-test-up" "demo_workspace" >/dev/null
 assert_equal "mc-demo-test-up" "$deleted_network" "owned network cleanup"
+
+mock_workspace_exists=true
+mock_default_select_succeeds=true
+mock_workspace_delete_succeeds=true
+tofu() {
+    if [[ "${1:-} ${2:-} ${3:-}" == "workspace select default" ]]; then
+        [[ "$mock_default_select_succeeds" == true ]]
+        return
+    fi
+    if [[ "${1:-} ${2:-}" == "workspace delete" ]]; then
+        if [[ "$mock_workspace_delete_succeeds" == true ]]; then
+            mock_workspace_exists=false
+            return 0
+        fi
+        return 1
+    fi
+    if [[ "${1:-} ${2:-}" == "workspace list" ]]; then
+        echo "default"
+        if [[ "$mock_workspace_exists" == true ]]; then
+            echo "demo_workspace"
+        fi
+        return 0
+    fi
+    fail "unexpected mocked tofu command: $*"
+}
+
+mock_default_select_succeeds=false
+if delete_tofu_workspace "demo_workspace" >/dev/null; then
+    fail "workspace cleanup must fail if selecting default fails"
+fi
+[[ "$mock_workspace_exists" == true ]] || fail "failed default selection must preserve the workspace"
+
+mock_default_select_succeeds=true
+mock_workspace_delete_succeeds=false
+if delete_tofu_workspace "demo_workspace" >/dev/null; then
+    fail "workspace cleanup must fail if workspace deletion fails"
+fi
+[[ "$mock_workspace_exists" == true ]] || fail "failed deletion must preserve the workspace"
+
+mock_workspace_delete_succeeds=true
+delete_tofu_workspace "demo_workspace" >/dev/null \
+    || fail "an empty workspace should be deleted successfully"
+[[ "$mock_workspace_exists" == false ]] || fail "successful cleanup must remove the workspace"
 
 echo "All orchestrator network helper tests passed."
