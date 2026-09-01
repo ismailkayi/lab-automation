@@ -336,25 +336,41 @@
       loop: "{{ groups['microcloud'] }}"
       when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
 
-    - name: Read Ceph public network
-      command: microceph.ceph config get global public_network
-      register: ceph_public_network
+    - name: Read Ceph monitor configuration
+      command: microceph.ceph config dump --format json
+      register: ceph_config_dump
       changed_when: false
       when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
 
-    - name: Read Ceph cluster network
-      command: microceph.ceph config get global cluster_network
-      register: ceph_cluster_network
-      changed_when: false
+    - name: Read Ceph global network values
+      set_fact:
+        ceph_public_network: >-
+          {{
+            (ceph_config_dump.stdout | from_json).config
+            | selectattr('section', 'equalto', 'global')
+            | selectattr('name', 'equalto', 'public_network')
+            | map(attribute='value')
+            | first
+            | default('')
+          }}
+        ceph_cluster_network: >-
+          {{
+            (ceph_config_dump.stdout | from_json).config
+            | selectattr('section', 'equalto', 'global')
+            | selectattr('name', 'equalto', 'cluster_network')
+            | map(attribute='value')
+            | first
+            | default('')
+          }}
       when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
 
     - name: Verify Ceph public and cluster networks use ceph-general
       assert:
         that:
-          - ceph_public_network.stdout | trim == microcloud_ceph_general_cidr
-          - ceph_cluster_network.stdout | trim == microcloud_ceph_general_cidr
+          - ceph_public_network == microcloud_ceph_general_cidr
+          - ceph_cluster_network == microcloud_ceph_general_cidr
         fail_msg: >-
           Ceph networks do not match {{ microcloud_ceph_general_cidr }}:
-          public={{ ceph_public_network.stdout | trim }},
-          cluster={{ ceph_cluster_network.stdout | trim }}.
+          public={{ ceph_public_network | default('missing', true) }},
+          cluster={{ ceph_cluster_network | default('missing', true) }}.
       when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
