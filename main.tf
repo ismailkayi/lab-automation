@@ -7,8 +7,9 @@
 terraform {
   required_providers {
     lxd = {
+      # 2.6.1+ waits for asynchronous LXD storage operations before reading state.
       source  = "terraform-lxd/lxd"
-      version = "~> 2.4.0"
+      version = "~> 2.6.1"
     }
     local = {
       source  = "hashicorp/local"
