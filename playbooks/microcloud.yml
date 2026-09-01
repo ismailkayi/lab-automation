@@ -346,7 +346,7 @@
       set_fact:
         ceph_public_network: >-
           {{
-            (ceph_config_dump.stdout | from_json).config
+            ceph_config_entries
             | selectattr('section', 'equalto', 'global')
             | selectattr('name', 'equalto', 'public_network')
             | map(attribute='value')
@@ -355,12 +355,20 @@
           }}
         ceph_cluster_network: >-
           {{
-            (ceph_config_dump.stdout | from_json).config
+            ceph_config_entries
             | selectattr('section', 'equalto', 'global')
             | selectattr('name', 'equalto', 'cluster_network')
             | map(attribute='value')
             | first
             | default('')
+          }}
+      vars:
+        ceph_config_json: "{{ ceph_config_dump.stdout | from_json }}"
+        ceph_config_entries: >-
+          {{
+            ceph_config_json.config
+            if ceph_config_json is mapping and 'config' in ceph_config_json
+            else ceph_config_json
           }}
       when: microcloud_network_mode | default('standard-2nic') == 'fully-segregated-4nic'
 
