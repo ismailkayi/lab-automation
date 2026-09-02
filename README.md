@@ -1,91 +1,196 @@
 # Canonical Lab Automation
 
-Canonical Lab Automation creates local Canonical labs on top of LXD virtual machines.
+Canonical Lab Automation is a guided command-line tool for creating repeatable
+Canonical infrastructure labs on a single LXD host. It provisions Ubuntu
+virtual machines with OpenTofu and, for full deployments, configures the
+selected product with Ansible.
 
-Supported scenarios:
+The project supports:
 
-- MicroCloud
-- Canonical Kubernetes (Snap)
-- Canonical Kubernetes (Juju)
+- **MicroCloud**
+- **Canonical Kubernetes (Snap)**
+- **Canonical Kubernetes (Juju)**
 
-## Table of Contents
+Each product is available as either a complete, automated deployment or an
+infrastructure-only training environment.
 
-- [Download](#download)
-- [Before You Start](#before-you-start)
+> [!IMPORTANT]
+> This project is intended for labs, demonstrations, learning, and functional
+> testing. It is not a production deployment or high-availability solution.
+> All virtual machines run on the same LXD host.
+
+## Contents
+
+- [Choose a Lab Type](#choose-a-lab-type)
+- [How the Automation Works](#how-the-automation-works)
+- [Requirements](#requirements)
+- [Install and Prepare the Host](#install-and-prepare-the-host)
 - [Quick Start](#quick-start)
-- [How Naming Works](#how-naming-works)
-- [Training Labs](#training-labs)
-- [Deploying MicroCloud](#deploying-microcloud)
-- [Deploying Canonical Kubernetes](#deploying-canonical-kubernetes)
-- [Deploying Canonical Kubernetes (Juju)](#deploying-canonical-kubernetes-juju)
-- [Destroying an Environment](#destroying-an-environment)
-- [SSH Access](#ssh-access)
-- [Typical Usage Examples](#typical-usage-examples)
-- [Notes](#notes)
+- [Full and Training Deployments](#full-and-training-deployments)
+- [Lab Names and Isolation](#lab-names-and-isolation)
+- [Sizing Profiles](#sizing-profiles)
+- [Deploy MicroCloud](#deploy-microcloud)
+- [Deploy Canonical Kubernetes (Snap)](#deploy-canonical-kubernetes-snap)
+- [Deploy Canonical Kubernetes (Juju)](#deploy-canonical-kubernetes-juju)
+- [Manage Existing Labs](#manage-existing-labs)
+- [Access a Lab](#access-a-lab)
+- [Safety and Operational Behavior](#safety-and-operational-behavior)
 - [Troubleshooting](#troubleshooting)
-- [Summary](#summary)
+- [Further Reading and Support](#further-reading-and-support)
+- [Project Layout](#project-layout)
 
-## Download
+## Choose a Lab Type
 
-If you are not familiar with `git`, you can download this repository with `wget`:
+Use this table if you are not sure which option to select.
 
-```bash
-wget https://codeload.github.com/ismailkayi/lab-automation/zip/refs/heads/main -O lab-automation.zip
-unzip lab-automation.zip
-cd lab-automation-main
-```
+| Lab | Use it when you want to | Default topology |
+| --- | --- | --- |
+| MicroCloud | Learn or test clustered LXD, MicroCeph, and MicroOVN | 3 nodes |
+| Canonical Kubernetes (Snap) | Run Canonical Kubernetes directly from the `k8s` snap | 3 control-plane nodes and 1 worker |
+| Canonical Kubernetes (Juju) | Deploy Canonical Kubernetes as Juju-managed applications | 1 Juju controller, 1 Kubernetes control-plane node, and 1 worker |
+| Training variant | Receive prepared virtual machines, networking, disks, and SSH access without automated product installation | Matches the selected product |
 
-After downloading, continue with the steps below.
+For a first test, the recommended starting point is a **training lab**. It
+validates the infrastructure and SSH access without installing or bootstrapping
+the product.
 
-## Before You Start
+## How the Automation Works
 
-Minimum host requirements:
+The deployment has three layers:
 
-- a Linux host
-- `sudo` access
-- internet access
+1. **LXD** runs the virtual machines and provides storage and networking.
+2. **OpenTofu** creates and tracks the infrastructure.
+3. **Ansible** installs and configures the selected product for full deployments.
 
-This project needs these tools on the host:
+The main scripts are:
+
+- `prep_host.sh`: prepares the host and validates prerequisites.
+- `orchestrate.sh`: creates, updates, rebuilds, or destroys labs.
+
+Some terms used in this guide:
+
+- **Host**: the physical or virtual Linux machine running LXD.
+- **Node**: an LXD virtual machine that belongs to a lab.
+- **NIC**: a network interface attached to a virtual machine.
+- **CIDR**: an IP subnet written in a form such as `172.28.40.0/24`.
+- **Control plane**: Kubernetes nodes that manage the cluster.
+- **Worker**: a Kubernetes node intended to run workloads.
+
+## Requirements
+
+### Host requirements
+
+You need:
+
+- a Linux host capable of running LXD virtual machines;
+- hardware virtualization support (`/dev/kvm`);
+- a regular user account with `sudo` access;
+- internet access for Ubuntu images, snaps, packages, Ansible content, and
+  product artifacts;
+- enough CPU, memory, and storage for the selected topology.
+
+The automated preparation path uses `apt` and `snap`, so an Ubuntu host is
+recommended.
+
+There is no single hardware minimum for every scenario. Before provisioning,
+the sizing advisor examines the host and proposes values for the selected
+topology. MicroCloud requires at least three nodes and therefore needs more
+resources than a small single-node Kubernetes lab.
+
+> [!NOTE]
+> The sizing advisor evaluates the selected lab against the host's total
+> resources. On a host that already contains other labs, review the current LXD
+> allocations before accepting a large sizing profile.
+
+### Software
+
+The project uses:
 
 - LXD
 - OpenTofu
 - Ansible
 - the `community.general` Ansible collection
+- OpenSSH client tools
 
-You have two ways to continue:
+The preparation script installs or configures missing requirements.
 
-### Option 1: Auto-prepare Script
+## Install and Prepare the Host
 
-Run:
+### 1. Download the repository
+
+The recommended method is Git:
+
+```bash
+git clone https://github.com/ismailkayi/lab-automation.git
+cd lab-automation
+```
+
+To test changes that have not yet reached the default branch:
+
+```bash
+git clone --branch staging \
+  https://github.com/ismailkayi/lab-automation.git \
+  lab-automation-staging
+cd lab-automation-staging
+```
+
+The `staging` branch can change more frequently. Use the default branch unless
+you specifically need a feature that is still under validation.
+
+If Git is not available, download the default branch as a ZIP archive:
+
+```bash
+wget \
+  https://codeload.github.com/ismailkayi/lab-automation/zip/refs/heads/main \
+  -O lab-automation.zip
+unzip lab-automation.zip
+cd lab-automation-main
+```
+
+### 2. Prepare the host
+
+Run the preparation script as the regular user who will operate the labs:
 
 ```bash
 chmod +x prep_host.sh
 ./prep_host.sh
 ```
 
-This script checks the host and prepares missing requirements automatically. It can:
+The script can:
 
-- install LXD
-- run `lxd init --auto` if needed
-- add your user to the `lxd` group if needed
-- install OpenTofu
-- install Ansible
-- install the `community.general` collection
-- create `~/.ssh/id_rsa_lab` if missing
-- run `tofu init`
-- validate LXD storage, networking, and non-root user access
-- repair ownership of generated lab files left by an earlier sudo run
+- install LXD, OpenTofu, Ansible, and OpenSSH client tools;
+- initialize LXD when no storage pool exists;
+- create a usable LXD bridge when needed;
+- add the current user to the `lxd` group;
+- install the required Ansible collection;
+- create the lab SSH key at `~/.ssh/id_rsa_lab`;
+- initialize the OpenTofu providers;
+- validate LXD storage, networking, and non-root access;
+- repair ownership left by an earlier run with `sudo`.
 
-This is the easiest option for a new user.
+If the script adds you to the `lxd` group, activate the new membership before
+continuing:
 
-Run `prep_host.sh` as the regular user who will operate the labs. The script requests sudo only for host-level changes. If it adds the user to the `lxd` group, open a new login session or run `newgrp lxd` before starting the orchestrator.
+```bash
+newgrp lxd
+```
 
-Do not run `orchestrate.sh` with sudo. It deliberately exits when run as root so SSH keys, state, and inventory files remain owned by the regular lab user.
+Alternatively, sign out and sign in again.
 
-### Option 2: Prepare the host yourself
+> [!WARNING]
+> Do not run `orchestrate.sh` with `sudo`. The orchestrator deliberately stops
+> when run as root so that SSH keys, OpenTofu state, and inventory files remain
+> owned by the regular lab user.
 
-If your host is already ready, you can skip `prep_host.sh` and run the main deployment script directly.
+### 3. Verify host access
 
+These commands should complete without `sudo`:
+
+```bash
+lxc info
+tofu version
+ansible --version
+```
 
 ## Quick Start
 
@@ -96,7 +201,7 @@ chmod +x orchestrate.sh
 ./orchestrate.sh
 ```
 
-You will then choose one of these grouped options:
+The main menu is grouped by purpose:
 
 ```text
 FULL LAB DEPLOYMENTS
@@ -114,311 +219,564 @@ ENVIRONMENT MANAGEMENT
   0) Exit
 ```
 
-## How Naming Works
+For a first deployment:
 
-You will be asked to enter a simple lab prefix such as:
+1. Choose a full or training scenario.
+2. Choose **Deploy a new lab**.
+3. Enter a short lab name, for example `demo`.
+4. Select the topology and sizing profile.
+5. Review the displayed configuration.
+6. Wait for infrastructure provisioning and validation to finish.
+7. Use the final summary to connect to the lab.
+
+Screenshots may differ slightly as menu options evolve.
+
+![Main menu](docs/images/main-menu.png)
+
+## Full and Training Deployments
+
+| Behavior | Full deployment | Training deployment |
+| --- | --- | --- |
+| Creates LXD virtual machines | Yes | Yes |
+| Creates networking and disks | Yes | Yes |
+| Injects the lab SSH key | Yes | Yes |
+| Waits for cloud-init | Yes | Yes |
+| Validates node access | Yes, through the Ansible/LXD connection | Yes, through SSH to every node |
+| Installs product packages | Yes | No |
+| Bootstraps the product or cluster | Yes | No |
+
+Training labs intentionally leave product installation to the participant:
+
+- **MicroCloud Training** leaves MicroCloud, MicroCeph, MicroOVN, and LXD
+  installation and cluster initialization to the participant. Each node also
+  receives an extra local disk for storage exercises.
+- **Canonical Kubernetes Snap Training** leaves `k8s` snap installation and
+  cluster bootstrap to the participant.
+- **Canonical Kubernetes Juju Training** leaves Juju installation, controller
+  bootstrap, and application deployment to the participant.
+
+Full and training labs use separate OpenTofu workspaces. The same short name
+can therefore be used once for a full lab and once for a training lab.
+
+## Lab Names and Isolation
+
+When prompted, enter a short name containing letters and numbers:
 
 ```text
-mylab
+demo
 ```
 
-The script converts it into a workspace name automatically:
+The orchestrator converts it into a scenario-specific OpenTofu workspace:
 
-- Kubernetes: `mylab_k8s-snap`
-- Kubernetes (Juju): `mylab_k8s-juju`
-- MicroCloud: `mylab_microcloud`
-- Kubernetes training: `mylab_training-k8s-snap`
-- Kubernetes (Juju) training: `mylab_training-k8s-juju`
-- MicroCloud training: `mylab_training-microcloud`
+| Selection | Workspace |
+| --- | --- |
+| MicroCloud | `demo_microcloud` |
+| MicroCloud Training | `demo_training-microcloud` |
+| Kubernetes Snap | `demo_k8s-snap` |
+| Kubernetes Snap Training | `demo_training-k8s-snap` |
+| Kubernetes Juju | `demo_k8s-juju` |
+| Kubernetes Juju Training | `demo_training-k8s-juju` |
 
-## Training Labs
+Workspaces keep the OpenTofu state for each lab separate. LXD resource names
+use the same prefix with LXD-safe hyphens.
 
-Training options provision the same VM roles, sizing, networking, disks, and SSH access as their corresponding full lab. They intentionally do not run product installation or cluster bootstrap playbooks.
+Do not manually delete the `terraform.tfstate.d/` directory. It contains the
+state required to update and safely destroy existing labs.
 
-- MicroCloud Training leaves MicroCloud, MicroCeph, MicroOVN, and LXD installation to participants.
-- Canonical K8s Snap Training leaves the Canonical K8s snap and cluster bootstrap to participants.
-- Canonical K8s Juju Training leaves Juju installation, controller bootstrap, and Kubernetes deployment to participants.
+## Sizing Profiles
 
-After OpenTofu finishes, the script waits for cloud-init and verifies SSH access to every training VM. The final summary lists each node, its role and IP, and the participant's next step.
+Before a new or rebuilt lab is created, the orchestrator examines host CPU,
+memory, and, where applicable, storage. It then presents practical sizing
+profiles:
 
-Full and training labs use different workspace names, so the same prefix can be used for both without sharing state. Legacy MicroCloud infra-only workspaces are still recognized as training labs.
+| Profile | Purpose |
+| --- | --- |
+| `balanced` | Recommended default for most labs |
+| `conservative` | Lower resource use |
+| `performance` | More resources and headroom |
+| `custom` | Manually enter per-node values |
 
-## Deploying MicroCloud
+The selected values are shown before provisioning.
 
-MicroCloud has two deployment modes:
+For MicroCloud, custom sizing includes:
 
-- `MicroCloud`: installs packages and performs automated cluster bootstrap
-- `MicroCloud Training`: creates VM/network/disk infrastructure without installing MicroCloud packages or initializing the cluster
-  - each training node gets an extra local storage disk for participant exercises, such as local ZFS tests
+- vCPU per node;
+- memory per node in GiB;
+- root disk per node in GiB;
+- Ceph disk per node in GiB.
 
-For a new or rebuilt MicroCloud lab, choose between `3` and `10` nodes:
-
-- default: `3`
-- minimum: `3`
-- maximum enforced by this lab automation: `10`
-- MicroCeph enabled
-- MicroOVN enabled
-
-The node count can be selected for full and training labs. Changing the node count or network mode of an existing MicroCloud lab requires a rebuild.
-
-After selecting the node count, choose one of two network modes:
-
-- `Standard - 2 NICs` (default, backward-compatible):
-  - `eth0`: management, SSH, and cluster communication
-  - `eth1`: dedicated IP-free MicroOVN external uplink, configured UP at boot
-- `Fully Segregated - 4 NICs (Dedicated OVN and Ceph Planes)`:
-  - `mgmt0`: SSH plus MicroCloud and LXD management/cluster communication
-  - `ovn-uplink`: dedicated IP-free external OVN uplink
-  - `ovn-underlay`: persistent static addressing for OVN Geneve encapsulation
-  - `ceph-general`: persistent static addressing for both Ceph public/client and internal/replication traffic
-
-The four-NIC mode proposes deterministic per-lab `/24` CIDRs, which can be overridden during creation or rebuild. Provisioning stops if either CIDR overlaps a host route, an LXD managed subnet, or the other selected plane. The dedicated addresses are written through cloud-init network configuration and survive reboots.
-
-Both network modes use MAC-matched cloud-init network configuration. The OVN uplink is brought UP without DHCP, router advertisements, or IPv4/IPv6 link-local addressing, so it remains IP-free across reboots.
-
-Before MicroCloud installation, every Standard node is checked for an UP, IP-free uplink and a management default route. Every four-NIC node is additionally checked for the expected addresses, plane-specific routes, and all-to-all OVN/Ceph connectivity. After bootstrap, the automation verifies that every OVN encapsulation address uses `ovn-underlay` and that both Ceph `public_network` and `cluster_network` use the `ceph-general` CIDR.
-
-Post-deployment validation distinguishes confirmed configuration errors from version-specific introspection limitations. A successfully read OVN or Ceph configuration that does not match the selected network plan fails validation. If a supported health check passes but an introspection command is unavailable or returns an unknown format, deployment completes with `Validation: PASSED WITH WARNINGS` and requests manual verification.
-
-Training mode creates and validates the same selected NIC layout and SSH access, but still skips package installation and MicroCloud preseed/bootstrap.
-
-Lab-created LXD networks carry ownership and role tags. Cleanup removes only networks whose ownership tag matches the selected workspace; unowned or ambiguous networks are left untouched.
-
-### MicroCloud Sizing Profiles
-
-During MicroCloud deployment, the script scans host resources and suggests per-node sizing for the selected node count. It stops before provisioning if the selected topology and profile exceed available CPU, RAM, or storage after host reserve.
-
-- `balanced`: default profile
-- `conservative`: smaller than balanced
-- `performance`: larger than balanced
-- `custom`: you enter per-node values manually
-
-For `custom`, values are entered as per-node `vCPU`, `memory (GB)`, `root disk (GB)`, and `ceph disk (GB)`.
-
-Sizing advisor example:
+For Kubernetes, control-plane and worker nodes are sized separately.
 
 ![MicroCloud sizing advisor](docs/images/microcloud-sizing.png)
 
-At the end of a successful deployment, the script prints:
+![Kubernetes sizing advisor](docs/images/k8s-sizing.png)
 
-- cluster health
-- cluster nodes
-- UI access links on port `8443`
+## Deploy MicroCloud
 
-Deployment status example:
+### MicroCloud lab contents
 
-![MicroCloud status](docs/images/microcloud-status.png)
+A MicroCloud lab includes:
 
-### Existing MicroCloud Lab
+- 3 to 10 Ubuntu virtual machines;
+- one root disk and one dedicated Ceph data disk per node;
+- MicroCloud, MicroCeph, MicroOVN, and LXD in full mode;
+- an additional local disk per node in training mode;
+- one of the network layouts described below.
 
-When you select an existing MicroCloud lab, the script offers:
+The default topology is three nodes.
 
-- `rebuild`: destroy and recreate the lab from scratch
-- `delete`: remove the lab and exit
-- `cancel`: stop the operation
+### Choose a network layout
 
-## Deploying Canonical Kubernetes
+After selecting the node count, choose a network mode.
 
-Kubernetes supports:
+#### Standard - 2 NICs
 
-- `1` or `3` control-plane nodes
-- `0` or more worker-only nodes
+This is the default and backward-compatible layout.
 
-Default values:
+| Interface | Purpose |
+| --- | --- |
+| Management NIC | SSH, MicroCloud discovery, LXD management, and cluster communication |
+| OVN uplink NIC | Dedicated OVN uplink; brought up at boot with no IPv4 or IPv6 address |
 
-- `3` control-plane nodes
-- `1` worker-only node
+The Linux interface names are assigned by the guest operating system and can
+look like `enp5s0` and `enp6s0`.
 
-Prompts:
+Choose this layout for general learning and functional testing.
 
-```text
-Number of control-plane nodes [default: 3, allowed: 1 or 3]:
-Number of worker-only nodes [default: 1, enter 0 for none]:
-```
+#### Fully Segregated - 4 NICs
 
-### Kubernetes Sizing
+This layout separates management, OVN, and Ceph traffic.
 
-During Kubernetes deployment, VM sizing is calculated dynamically from host resources and selected cluster topology (`control-plane` and `worker` counts).
+| Interface | Purpose |
+| --- | --- |
+| `mgmt0` | SSH, MicroCloud discovery, and LXD management |
+| `ovn-uplink` | Dedicated IP-free OVN uplink |
+| `ovn-underlay` | OVN Geneve encapsulation traffic |
+| `ceph-general` | Ceph public/client and internal/replication traffic |
 
-- Profiles: `balanced` (default), `conservative`, `performance`, `custom`
-- Control-plane and worker nodes are sized separately
-- CPU and memory values are rounded to practical, commonly used tiers
-- `custom` lets you enter per-node vCPU and memory (GB)
+The orchestrator proposes separate `/24` CIDRs for `ovn-underlay` and
+`ceph-general`. Press **Enter** to accept the proposed values or enter your own
+IPv4 CIDRs.
 
-Sizing advisor example:
+Before provisioning, it checks the selected CIDRs against:
 
-![K8s sizing advisor](docs/images/k8s-sizing.png)
+- host routes;
+- LXD managed subnets;
+- CIDRs recorded for other managed labs;
+- the other selected network plane;
+- the planned OVN external subnet.
 
-At the end of a successful deployment, the script prints:
+Provisioning stops if a collision is found. Static addresses are matched to
+stable MAC addresses and persist across reboots.
 
-- cluster nodes
-- Kubernetes API endpoint
-- node status from `kubectl get nodes -o wide`
+Use this layout when you want to study or validate dedicated OVN and Ceph
+network planes.
 
-### Existing Kubernetes Lab
+### MicroCloud validation
 
-Existing labs are listed whenever you choose a deploy option. If the lab name already exists, the script shows the current topology and asks what to do:
+Before cluster bootstrap, the orchestrator validates:
 
-- `add`: expand the cluster
-- `rebuild`: destroy and recreate the cluster
-- `cancel`: stop the operation
+- expected interfaces and addresses;
+- an IP-free OVN uplink;
+- the management default route;
+- plane-specific routes in four-NIC mode;
+- all-to-all OVN underlay and Ceph connectivity in four-NIC mode.
 
-Important:
+After bootstrap, it checks:
 
-- growing is supported
-- shrinking in place is not supported
-- to reduce node count, use `rebuild`
+- MicroCloud cluster membership;
+- Ceph health;
+- OVN encapsulation addresses;
+- Ceph public and cluster network settings.
 
-## Deploying Canonical Kubernetes (Juju)
-
-The Juju-based scenario creates a dedicated Juju controller VM and deploys Canonical Kubernetes on separate control-plane and worker VMs.
-
-Canonical Kubernetes (Juju) supports:
-
-- `1` or `3` control-plane nodes
-- `1` or more worker nodes
-
-Default values:
-
-- `1` control-plane node
-- `1` worker node
-
-Prompts:
+A confirmed mismatch fails validation. If a product version does not support
+an introspection command or returns an unknown output format, the deployment is
+not incorrectly marked as failed. The summary reports:
 
 ```text
-Number of control-plane nodes [default: 1, allowed: 1 or 3]:
-Number of worker nodes [default: 1, enter 1 or more]:
+Deployment: SUCCESS
+Validation: PASSED WITH WARNINGS
 ```
 
-### Kubernetes (Juju) Sizing
+Review the accompanying warning and perform the suggested manual check.
 
-The Juju scenario uses the same sizing advisor as the snap-based Kubernetes flow.
+### Complete a new MicroCloud deployment
 
-- Profiles: `balanced` (default), `conservative`, `performance`, `custom`
-- Control-plane and worker nodes are sized separately
-- `custom` lets you enter per-node vCPU and memory (GB)
+1. Run `./orchestrate.sh`.
+2. Select **MicroCloud** or **MicroCloud Training**.
+3. Select **Deploy a new lab**.
+4. Enter a lab name.
+5. Choose 3 to 10 nodes.
+6. Choose the two-NIC or four-NIC network layout.
+7. Select a sizing profile.
+8. Wait for provisioning and validation.
 
-At the end of a successful deployment, the script prints:
+For a full deployment, the final summary includes cluster health, node
+addresses, and web UI links on port `8443`.
 
-- Juju controller VM name and IP
-- control-plane and worker nodes
-- a kubeconfig retrieval command
+![MicroCloud deployment summary](docs/images/microcloud-status.png)
 
-### Existing Kubernetes (Juju) Lab
+### Change an existing MicroCloud lab
 
-When you select an existing Juju lab, the script shows the current topology and offers these actions:
+MicroCloud node count and network mode are creation-time choices. To change
+either value:
 
-- `update in place`: add nodes or re-run reconciliation on the existing lab
-- `rebuild`: destroy and recreate the lab from scratch
-- `delete`: remove the lab and exit
-- `cancel`: stop the operation
+1. select the existing lab;
+2. choose **Rebuild**;
+3. confirm destruction;
+4. choose the new topology during redeployment.
 
-Important:
+A rebuild permanently deletes the existing lab before creating it again.
 
-- growing is supported in place
-- shrinking in place is not supported
-- to reduce node count, use `rebuild`
-- during in-place updates, existing node sizing is preserved
-- new Juju machines are reconciled into the cluster automatically
+## Deploy Canonical Kubernetes (Snap)
 
-## Destroying an Environment
+### Snap lab contents
 
-Choose:
+The Snap scenario creates:
+
+- 1 or 3 control-plane virtual machines;
+- 0 or more worker-only virtual machines;
+- the Canonical Kubernetes `k8s` snap on every full-deployment node;
+- a bootstrapped Kubernetes cluster.
+
+Defaults:
+
+- 3 control-plane nodes;
+- 1 worker node.
+
+### Complete a new Snap deployment
+
+1. Run `./orchestrate.sh`.
+2. Select **Canonical K8s - Snap** or its training option.
+3. Select **Deploy a new lab**.
+4. Enter a lab name.
+5. Choose 1 or 3 control-plane nodes.
+6. Choose the number of workers; enter `0` if none are required.
+7. Select a sizing profile.
+8. Wait for provisioning and validation.
+
+For a full deployment, the final summary includes:
+
+- the Kubernetes API endpoint;
+- control-plane and worker addresses;
+- node status from `kubectl get nodes -o wide`.
+
+### Expand an existing Snap cluster
+
+The Snap scenario supports in-place expansion:
+
+1. select **Manage an existing lab**;
+2. choose the lab;
+3. choose **Add**;
+4. enter target node counts greater than or equal to the current counts.
+
+Shrinking in place is not supported. Choose **Rebuild** to reduce the number of
+nodes.
+
+## Deploy Canonical Kubernetes (Juju)
+
+### Juju lab contents
+
+The Juju scenario separates Juju management from the Kubernetes nodes:
+
+- 1 dedicated Juju controller VM;
+- 1 or 3 Kubernetes control-plane VMs;
+- 1 or more Kubernetes worker VMs;
+- a Juju manual cloud and workload model;
+- Canonical Kubernetes applications deployed by Juju.
+
+Defaults:
+
+- 1 Juju controller;
+- 1 Kubernetes control-plane node;
+- 1 worker node.
+
+The current implementation uses a single Juju controller. Because all VMs are
+on one LXD host, this scenario should not be treated as production HA.
+
+### Complete a new Juju deployment
+
+1. Run `./orchestrate.sh`.
+2. Select **Canonical K8s - Juju** or its training option.
+3. Select **Deploy a new lab**.
+4. Enter a lab name.
+5. Choose 1 or 3 Kubernetes control-plane nodes.
+6. Choose one or more worker nodes.
+7. Select a sizing profile.
+8. Wait for provisioning and validation.
+
+For a full deployment, the final summary includes:
+
+- the Juju controller name and address;
+- Kubernetes control-plane and worker addresses;
+- a command for retrieving the kubeconfig.
+
+### Expand an existing Juju deployment
+
+The Juju scenario supports in-place expansion:
+
+1. select **Manage an existing lab**;
+2. choose the lab;
+3. choose **Update in place**;
+4. enter target control-plane and worker counts greater than or equal to the
+   current counts.
+
+Existing node sizing is preserved, and new machines are reconciled into the
+Juju model. Shrinking in place is not supported; use **Rebuild** instead.
+
+## Manage Existing Labs
+
+When labs already exist for the selected scenario, the orchestrator offers:
 
 ```text
-7) Destroy Environments
+1) Deploy a new lab
+2) Manage an existing lab
+0) Cancel
 ```
 
-Then:
+Available actions depend on the product:
 
-1. Select the environment from the list
-2. Confirm by typing `yes`
+| Product | Available actions |
+| --- | --- |
+| MicroCloud | Rebuild, delete, cancel |
+| Kubernetes Snap | Add, rebuild, cancel |
+| Kubernetes Juju | Update in place, rebuild, delete, cancel |
 
-Destroy confirmation example:
+### Rebuild
+
+Rebuild destroys the selected lab and creates it again. Use it to:
+
+- reduce a topology;
+- change the MicroCloud network mode;
+- recover a disposable lab that cannot be reconciled safely.
+
+All data stored in the lab is permanently deleted.
+
+### Destroy
+
+To permanently remove a lab:
+
+1. run `./orchestrate.sh`;
+2. select **Destroy Environments**;
+3. select the workspace from the numbered list;
+4. type `yes` exactly when prompted.
 
 ![Destroy confirmation](docs/images/confirm-destroy.png)
 
-## SSH Access
+The orchestrator destroys tracked resources, removes safe owned MicroCloud
+network remnants, deletes the OpenTofu workspace, and removes its generated
+inventory file.
 
-After deployment, connect with:
+Lab-created MicroCloud networks include ownership tags. Cleanup removes only
+networks attributed to the selected workspace; unowned or ambiguous networks
+are left untouched.
+
+## Access a Lab
+
+### SSH
+
+The preparation script creates one SSH key for lab access:
+
+```text
+~/.ssh/id_rsa_lab
+```
+
+Connect to any node shown in the deployment summary:
 
 ```bash
 ssh -i ~/.ssh/id_rsa_lab ubuntu@<VM_IP>
 ```
 
-## Typical Usage Examples
+### MicroCloud web UI
 
-### New MicroCloud Lab
+For a full MicroCloud deployment, use a URL printed in the final summary:
 
-1. Run `./orchestrate.sh`
-2. Choose `MicroCloud (automated deployment)`
-3. Enter a lab prefix
-4. Choose a node count from `3` to `10`
+```text
+https://<NODE_IP>:8443
+```
 
-### New Kubernetes Lab
+### Kubernetes commands
 
-1. Run `./orchestrate.sh`
-2. Choose `Canonical K8s - Snap (automated deployment)`
-3. Enter a lab prefix such as `demo`
-4. Accept defaults or choose your topology
+For Snap deployments, commands can be run on a control-plane node:
 
-### Expand an Existing Kubernetes Lab
+```bash
+lxc exec <control-plane-node> -- k8s kubectl get nodes
+```
 
-1. Run `./orchestrate.sh`
-2. Choose `Canonical K8s - Snap (automated deployment)`
-3. Enter the same lab prefix as before
-4. Choose `add`
-5. Increase control-plane or worker-only count
+For Juju deployments, the final summary prints the command used to retrieve
+the kubeconfig from the leader unit.
 
-### New Kubernetes (Juju) Lab
+## Safety and Operational Behavior
 
-1. Run `./orchestrate.sh`
-2. Choose `Canonical K8s - Juju (automated deployment)`
-3. Enter a lab prefix such as `demo`
-4. Accept defaults or choose your topology
-
-### Expand an Existing Kubernetes (Juju) Lab
-
-1. Run `./orchestrate.sh`
-2. Choose `Canonical K8s - Juju (automated deployment)`
-3. Select the existing lab
-4. Choose `update in place`
-5. Increase control-plane or worker count
-
-## Notes
-
-- Kubernetes re-runs are designed to be safe and idempotent
-- Kubernetes (Juju) re-runs can reconcile newly added Juju machines into the cluster
-- MicroCloud re-runs are intended for verification and reconciliation of a healthy cluster
-- MicroCloud Terraform apply runs serially to reduce provider race issues during volume creation
-- Training deployments never run the product installation playbooks
+- Run the orchestrator as the regular lab user, never with `sudo`.
+- Each lab has a separate OpenTofu workspace and generated Ansible inventory.
+- MicroCloud applies run serially to avoid provider races during volume
+  creation.
+- The LXD provider waits for asynchronous storage operations before reading
+  resource state.
+- Training deployments never run product installation playbooks.
+- Kubernetes update paths are designed to reconcile or expand existing labs.
+- In-place topology shrink is intentionally blocked.
+- MicroCloud network cleanup is ownership-aware.
+- Workspace deletion is verified before a destroy operation is reported as
+  successful.
 
 ## Troubleshooting
 
-### The lab already exists
+### LXD works only with `sudo`
 
-Use the same lab name again.
+Run:
 
-For Kubernetes (Snap), the script will guide you through `add`, `rebuild`, or `cancel`.
+```bash
+./prep_host.sh
+```
 
-For Kubernetes (Juju), the script will guide you through `update in place`, `rebuild`, `delete`, or `cancel`.
+If it adds your user to the `lxd` group, run:
 
-### I want fewer Kubernetes nodes than I have now
+```bash
+newgrp lxd
+```
 
-In-place shrink is intentionally blocked. Use `rebuild`.
+or open a new login session. Confirm that `lxc info` works without `sudo`
+before starting the orchestrator.
 
-### A MicroCloud deployment failed midway
+### The orchestrator says not to run as root
 
-Use the destroy workflow and deploy again.
+Exit the root shell and run:
 
-### LXD only works with sudo
+```bash
+./orchestrate.sh
+```
 
-Run `./prep_host.sh` as your regular user. If it adds you to the `lxd` group, run `newgrp lxd` or open a new login session before running `./orchestrate.sh`.
+as the regular user who prepared the host.
 
-### SSH points to `/root/.ssh/id_rsa_lab`
+### A lab name already exists
 
-The lab was created by running the orchestrator with sudo. New runs are blocked in root context. Destroy the affected lab and recreate it as the regular user so `~/.ssh/id_rsa_lab` is injected into the VMs.
+Select **Manage an existing lab** instead of **Deploy a new lab**. Then choose
+the update, rebuild, delete, or cancel action offered for that product.
 
-## Summary
+### I need fewer Kubernetes nodes
 
-Run `./orchestrate.sh`, choose a scenario, enter a lab name, and let the script build or manage the environment for you.
+In-place shrinking is intentionally blocked. Rebuild the lab and select the
+smaller topology.
+
+### A MicroCloud subnet collision is reported
+
+The selected four-NIC subnet overlaps a host route, LXD network, another
+managed lab, or the other network plane. Run the deployment again and enter an
+unused IPv4 CIDR when prompted.
+
+Do not bypass the check unless the networks are intentionally isolated and you
+fully understand the routing design.
+
+### A MicroCloud deployment reports validation warnings
+
+`PASSED WITH WARNINGS` means the core deployment succeeded but a
+version-specific OVN or Ceph introspection check could not be completed.
+Review the warning text and run the suggested manual verification.
+
+A confirmed address or CIDR mismatch remains a validation failure.
+
+### A deployment stopped partway through
+
+Do not manually create duplicate resources immediately. First inspect the
+selected workspace:
+
+```bash
+tofu workspace list
+tofu workspace select <workspace>
+tofu state list
+```
+
+For a disposable lab, use **Destroy Environments** and deploy it again. The
+destroy workflow also attempts safe cleanup of known MicroCloud remnants.
+
+### A destroyed lab is still listed
+
+Update to the latest repository version and run the destroy action again. An
+empty workspace can be selected safely; the current workflow verifies that it
+is removed before reporting success.
+
+To inspect workspaces:
+
+```bash
+tofu workspace list
+```
+
+### SSH uses `/root/.ssh/id_rsa_lab`
+
+The lab was previously created from a root-run orchestrator. Destroy and
+recreate the affected lab as the regular user so the correct SSH key is
+injected.
+
+### Update the repository
+
+Check the current branch:
+
+```bash
+git branch --show-current
+```
+
+Update it without rewriting history:
+
+```bash
+git pull --ff-only
+```
+
+After a provider update, initialize the locked versions:
+
+```bash
+tofu init
+```
+
+## Further Reading and Support
+
+This repository automates several independent products. Refer to their official
+documentation for product concepts and advanced administration:
+
+- [MicroCloud documentation](https://documentation.ubuntu.com/microcloud/latest/)
+- [Canonical Kubernetes documentation](https://documentation.ubuntu.com/canonical-kubernetes/latest/)
+- [Juju documentation](https://documentation.ubuntu.com/juju/3.6/)
+- [LXD documentation](https://documentation.ubuntu.com/lxd/latest/)
+- [OpenTofu documentation](https://opentofu.org/docs/)
+
+To report a problem with this automation, open an issue in the
+[GitHub repository](https://github.com/ismailkayi/lab-automation/issues).
+Include:
+
+- the selected scenario and topology;
+- the current Git commit (`git rev-parse --short HEAD`);
+- the host and LXD versions;
+- the complete error message;
+- the output of `tofu workspace show` and `tofu state list`, when relevant.
+
+Remove credentials, private keys, tokens, and other sensitive values before
+sharing logs.
+
+## Project Layout
+
+| Path | Purpose |
+| --- | --- |
+| `prep_host.sh` | Host preparation and prerequisite validation |
+| `orchestrate.sh` | Interactive deployment and lifecycle management |
+| `main.tf` | LXD infrastructure definitions |
+| `.terraform.lock.hcl` | Locked OpenTofu provider versions and checksums |
+| `playbooks/microcloud.yml` | Full MicroCloud installation and validation |
+| `playbooks/k8s_snap.yml` | Full Canonical Kubernetes Snap deployment |
+| `playbooks/k8s_juju.yml` | Full Juju-managed Kubernetes deployment |
+| `tests/` | Targeted regression tests |
+| `docs/images/` | Documentation screenshots |
+| `terraform.tfstate.d/` | Per-workspace OpenTofu state generated at runtime |
+| `inventory_<workspace>.yaml` | Per-lab Ansible inventory generated at runtime |
+
+## Next Steps
+
+For a safe first run:
+
+```bash
+./prep_host.sh
+./orchestrate.sh
+```
+
+Choose a training scenario, accept a conservative or balanced sizing profile,
+and confirm SSH access to each node before creating a full deployment.
