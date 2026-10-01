@@ -65,6 +65,31 @@ assert_equal "${uplink_name%-up}-ce" "$ceph_name" "Ceph network name"
 (( ${#ovn_name} <= 15 )) || fail "OVN network name exceeds the LXD limit"
 (( ${#ceph_name} <= 15 )) || fail "Ceph network name exceeds the LXD limit"
 
+mapfile -t generated_labs < <(generate_batch_lab_names "student" 12 "microcloud")
+assert_equal "student01 student01_microcloud inventory_student01_microcloud.yaml" "${generated_labs[0]}" "first batch lab name"
+assert_equal "student12 student12_microcloud inventory_student12_microcloud.yaml" "${generated_labs[11]}" "last batch lab name"
+assert_equal "8" "$(normalize_decimal "08")" "leading-zero decimal normalization"
+if normalize_decimal "8labs" >/dev/null 2>&1; then
+    fail "non-numeric batch input must be rejected"
+fi
+assert_equal "8" "$(cpu_limit_to_count "8")" "numeric CPU limit"
+assert_equal "6" "$(cpu_limit_to_count "0-3,6,8")" "CPU set limit"
+assert_equal "12288" "$(memory_limit_to_mib "12GiB")" "GiB memory conversion"
+assert_equal "4096" "$(memory_limit_to_mib "4096MiB")" "MiB memory conversion"
+
+scenario="microcloud"
+DEPLOYMENT_MODE="full"
+MICROCLOUD_NODE_COUNT=3
+MICROCLOUD_NODE_CPU=8
+MICROCLOUD_NODE_MEMORY_MB=12288
+MICROCLOUD_ROOT_DISK_GIB=40
+MICROCLOUD_CEPH_DISK_GIB=50
+MICROCLOUD_LOCAL_DISK_GIB=20
+assert_equal "36 288 442368 3240" "$(get_batch_resource_request 12)" "full MicroCloud batch resources"
+DEPLOYMENT_MODE="training"
+assert_equal "36 288 442368 3960" "$(get_batch_resource_request 12)" "training MicroCloud batch resources"
+DEPLOYMENT_MODE="full"
+
 deleted_network=""
 mock_owner="another_workspace"
 mock_network_exists=true
@@ -112,6 +137,16 @@ mock_owner="demo_workspace"
 delete_owned_microcloud_network "mc-demo-test-up" "demo_workspace" >/dev/null
 assert_equal "mc-demo-test-up" "$deleted_network" "owned network cleanup"
 
+BATCH_WORKSPACE_NAMES=(batch01_microcloud batch02_microcloud batch03_microcloud)
+MICROCLOUD_NODE_COUNT=3
+allocate_batch_microcloud_cidrs
+assert_equal "3" "${#BATCH_OVN_UNDERLAY_CIDRS[@]}" "batch OVN CIDR count"
+assert_equal "3" "${#BATCH_CEPH_GENERAL_CIDRS[@]}" "batch Ceph CIDR count"
+[[ "${BATCH_OVN_UNDERLAY_CIDRS[0]}" != "${BATCH_OVN_UNDERLAY_CIDRS[1]}" ]] \
+    || fail "batch OVN CIDRs must be unique"
+[[ "${BATCH_CEPH_GENERAL_CIDRS[0]}" != "${BATCH_CEPH_GENERAL_CIDRS[1]}" ]] \
+    || fail "batch Ceph CIDRs must be unique"
+
 mock_workspace_exists=true
 mock_default_select_succeeds=true
 mock_workspace_delete_succeeds=true
@@ -154,5 +189,51 @@ mock_workspace_delete_succeeds=true
 delete_tofu_workspace "demo_workspace" >/dev/null \
     || fail "an empty workspace should be deleted successfully"
 [[ "$mock_workspace_exists" == false ]] || fail "successful cleanup must remove the workspace"
+
+get_host_cpu_count() { echo 96; }
+get_host_memory_mib() { echo 524288; }
+get_existing_lxd_commitments() { echo "0 0"; }
+get_batch_resource_request() { echo "36 288 442368 3240"; }
+get_management_network_capacity() { echo 253; }
+count_management_network_instances() { echo 0; }
+get_storage_available_gib() { echo 2000; }
+BATCH_LAB_COUNT=12
+assert_equal "4" "$BATCH_CPU_OVERCOMMIT_LIMIT" "automatic CPU overcommit ceiling"
+BATCH_RAM_OVERHEAD_PERCENT=15
+print_batch_capacity_plan >/dev/null \
+    || fail "the intended 12-lab 3:1 CPU and non-overcommitted RAM plan should pass"
+
+get_batch_resource_request() { echo "36 385 442368 3240"; }
+if print_batch_capacity_plan >/dev/null; then
+    fail "a batch above the internal 4:1 CPU commit ceiling must fail"
+fi
+
+get_batch_resource_request() { echo "36 288 460000 3240"; }
+if print_batch_capacity_plan >/dev/null; then
+    fail "a batch above the physical RAM budget must fail"
+fi
+
+deploy_lab() {
+    if [[ "$1" == "student02" ]]; then
+        return 1
+    fi
+}
+
+BATCH_LAB_COUNT=3
+BATCH_USER_PREFIXES=(student01 student02 student03)
+BATCH_WORKSPACE_NAMES=(student01_microcloud student02_microcloud student03_microcloud)
+BATCH_INVENTORY_FILES=(inventory_student01_microcloud.yaml inventory_student02_microcloud.yaml inventory_student03_microcloud.yaml)
+BATCH_OVN_UNDERLAY_CIDRS=()
+BATCH_CEPH_GENERAL_CIDRS=()
+if run_batch_deployments >/tmp/test-batch-summary.log 2>&1; then
+    fail "a failed batch lab must fail the batch"
+fi
+grep -q 'student01.*SUCCESS' /tmp/test-batch-summary.log \
+    || fail "batch summary must report the successful lab"
+grep -q 'student02.*FAILED' /tmp/test-batch-summary.log \
+    || fail "batch summary must report the failed lab"
+grep -q 'student03.*NOT STARTED' /tmp/test-batch-summary.log \
+    || fail "batch summary must report labs not started after a failure"
+rm -f /tmp/test-batch-summary.log
 
 echo "All orchestrator network helper tests passed."

@@ -28,6 +28,7 @@ infrastructure-only training environment.
 - [Quick Start](#quick-start)
 - [Full and Training Deployments](#full-and-training-deployments)
 - [Lab Names and Isolation](#lab-names-and-isolation)
+- [Deploy Multiple Identical Labs](#deploy-multiple-identical-labs)
 - [Sizing Profiles](#sizing-profiles)
 - [Deploy MicroCloud](#deploy-microcloud)
 - [Deploy Canonical Kubernetes (Snap)](#deploy-canonical-kubernetes-snap)
@@ -98,9 +99,10 @@ topology. MicroCloud requires at least three nodes and therefore needs more
 resources than a small single-node Kubernetes lab.
 
 > [!NOTE]
-> The sizing advisor evaluates the selected lab against the host's total
-> resources. On a host that already contains other labs, review the current LXD
-> allocations before accepting a large sizing profile.
+> Single-lab sizing evaluates the selected lab against the host's total
+> resources. Review existing allocations before accepting a large single-lab
+> profile. Batch sizing accounts for existing LXD commitments and divides the
+> remaining CPU and RAM budget across all requested labs.
 
 ### Software
 
@@ -223,11 +225,12 @@ For a first deployment:
 
 1. Choose a full or training scenario.
 2. Choose **Deploy a new lab**.
-3. Enter a short lab name, for example `demo`.
-4. Select the topology and sizing profile.
-5. Review the displayed configuration.
-6. Wait for infrastructure provisioning and validation to finish.
-7. Use the final summary to connect to the lab.
+3. Choose a single lab or a sequential batch.
+4. Enter a short lab name, for example `demo`.
+5. Select the topology and sizing profile.
+6. Review the displayed configuration.
+7. Wait for infrastructure provisioning and validation to finish.
+8. Use the final summary to connect to the lab.
 
 Screenshots may differ slightly as menu options evolve.
 
@@ -282,6 +285,125 @@ use the same prefix with LXD-safe hyphens.
 
 Do not manually delete the `terraform.tfstate.d/` directory. It contains the
 state required to update and safely destroy existing labs.
+
+## Deploy Multiple Identical Labs
+
+Batch deployment creates 2 to 50 labs with one shared configuration. It is
+useful for classrooms, workshops, and repeatable multi-user test environments.
+
+After choosing **Deploy a new lab**, select:
+
+```text
+Deployment Scope
+  1) Single lab (default)
+  2) Multiple identical labs (sequential batch)
+```
+
+The orchestrator then asks for:
+
+- the number of labs;
+- a base lab name;
+- the topology, network mode, and sizing profile used by every lab.
+
+CPU sharing is managed automatically. There is no overcommit-ratio prompt.
+The internal ceiling is **4 vCPUs per host CPU thread (4:1)**, intended for
+shared, non-performance lab use rather than dedicated CPU performance.
+
+For a base name of `student` and 12 labs, names are generated with zero-padded
+numbers:
+
+```text
+student01
+student02
+...
+student12
+```
+
+Each lab receives its own:
+
+- OpenTofu workspace;
+- Ansible inventory;
+- LXD resource names;
+- MicroCloud uplink network;
+- OVN underlay and Ceph CIDRs in four-NIC mode.
+
+### Batch capacity admission
+
+Before the first lab is created, the orchestrator displays an aggregate plan:
+
+```text
+Batch Capacity Plan
+  Labs                         12
+  New virtual machines         36
+  Physical CPU threads         96
+  CPU commit ceiling           384 vCPU (4:1 internal limit)
+  Requested CPU                288 vCPU
+  CPU after deployment         288 vCPU (3.00:1)
+  Requested RAM                432 GiB
+```
+
+Admission rules:
+
+- existing LXD CPU and RAM limits are counted;
+- VMs belonging to the batch being resumed are replaced by the requested
+  batch values instead of being counted twice;
+- CPU commitment must not exceed the internal 4:1 ceiling;
+- RAM is not overcommitted;
+- physical RAM must cover committed VM memory plus 15% host overhead, with at
+  least 4 GiB left for the host;
+- the selected management subnet must have enough estimated addresses;
+- logical disk demand is reported, but may exceed current physical free space
+  when the LXD storage driver provides thin or sparse volumes.
+
+Sizing recommendations use the **remaining host-wide budget divided across
+all requested labs**, rather than treating every lab as if the host were empty.
+The Juju controller's 2 vCPUs and 4 GiB RAM per lab are reserved before sizing
+Kubernetes nodes. `balanced` targets 75% of each lab's remaining CPU budget,
+rounded to practical node sizes; `performance` can use more without exceeding
+the ceiling. Four-to-one is a maximum, not a target every batch must reach.
+
+Custom CPU and memory values are kept exactly as entered. If the complete
+batch would exceed its CPU or RAM budget, the orchestrator stops with an
+explanation instead of silently reducing the values.
+
+If the effective limits of an existing LXD instance cannot be read or
+interpreted, batch sizing stops rather than assuming that instance uses no
+resources. Configure explicit CPU and memory limits before retrying.
+
+Type `yes` after reviewing the plan to begin.
+
+### Execution and recovery
+
+Labs are created **sequentially**, not in parallel. Sequential deployment
+reduces load on the LXD storage pool, image server, Snap Store, and package
+repositories.
+
+The batch stops at the first failure and prints a status for every lab:
+
+```text
+student01   SUCCESS
+student02   SUCCESS
+student03   FAILED
+student04   NOT STARTED
+```
+
+To resume, run the same scenario and enter the same batch count, base name,
+topology, network mode, and sizing. Existing compatible workspaces are
+reconciled, and missing resources or product configuration are retried.
+If other host allocations have changed, automatic profile suggestions can also
+change; use `custom` with the original values when resuming existing labs.
+
+For safety, resume is rejected when an existing lab has:
+
+- more nodes than the requested topology;
+- different per-node CPU or memory sizing;
+- a different MicroCloud network mode.
+
+Use the individual rebuild workflow when one of those creation-time choices
+must change.
+
+In four-NIC batch mode, collision-free OVN and Ceph CIDRs are assigned
+automatically. Existing owned CIDRs are reused during resume.
 
 ## Sizing Profiles
 

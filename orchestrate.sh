@@ -35,6 +35,16 @@ K8S_CONTROL_PLANE_CPU="2"
 K8S_CONTROL_PLANE_MEMORY_GIB="4"
 K8S_WORKER_CPU="2"
 K8S_WORKER_MEMORY_GIB="4"
+DEPLOYMENT_SCOPE="single"
+BATCH_LAB_COUNT="1"
+BATCH_CPU_OVERCOMMIT_LIMIT="4"
+BATCH_RAM_OVERHEAD_PERCENT="15"
+BATCH_MAX_LABS="50"
+BATCH_USER_PREFIXES=()
+BATCH_WORKSPACE_NAMES=()
+BATCH_INVENTORY_FILES=()
+BATCH_OVN_UNDERLAY_CIDRS=()
+BATCH_CEPH_GENERAL_CIDRS=()
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
@@ -146,6 +156,18 @@ print_sizing_table_row() {
     printf '  %-18s %-6s %-8s %-8s %-8s %s\n' "$profile" "$cpu" "$memory" "$root" "$ceph" "$notes"
 }
 
+get_balanced_cpu_budget() {
+    local available_cpu="$1"
+    local minimum_cpu="$2"
+    # Balanced leaves room below the internal ceiling for the performance profile.
+    local budget=$((available_cpu * 3 / 4))
+
+    if (( budget < minimum_cpu )); then
+        budget="$minimum_cpu"
+    fi
+    echo "$budget"
+}
+
 fit_k8s_profile_to_host() {
     local cp_cpu="$1"
     local cp_ram_gb="$2"
@@ -155,8 +177,19 @@ fit_k8s_profile_to_host() {
     local worker_count="$6"
     local usable_cpu="$7"
     local usable_ram_gb="$8"
+    local minimum_cpu="${9:-2}"
+    local minimum_ram_gb="${10:-4}"
     local total_cpu="0"
     local total_ram_gb="0"
+    local -a cpu_tiers=(2 4 6 8 10 12 16)
+    local -a memory_tiers=(4 8 12 16 24 32 48 64 96 128)
+
+    if (( minimum_cpu == 1 )); then
+        cpu_tiers=(1 "${cpu_tiers[@]}")
+    fi
+    if (( minimum_ram_gb == 1 )); then
+        memory_tiers=(1 2 3 4 6 8 12 16 24 32 48 64 96 128)
+    fi
 
     while true; do
         total_cpu=$(( (cp_count * cp_cpu) + (worker_count * worker_cpu) ))
@@ -166,23 +199,23 @@ fit_k8s_profile_to_host() {
             break
         fi
 
-        if (( worker_count > 0 && worker_cpu > 2 )); then
-            worker_cpu=$(pick_previous_tier "$worker_cpu" 2 4 6 8 10 12 16)
+        if (( worker_count > 0 && worker_cpu > minimum_cpu )); then
+            worker_cpu=$(pick_previous_tier "$worker_cpu" "${cpu_tiers[@]}")
             continue
         fi
 
-        if (( cp_cpu > 2 )); then
-            cp_cpu=$(pick_previous_tier "$cp_cpu" 2 4 6 8 10 12 16)
+        if (( cp_cpu > minimum_cpu )); then
+            cp_cpu=$(pick_previous_tier "$cp_cpu" "${cpu_tiers[@]}")
             continue
         fi
 
-        if (( worker_count > 0 && worker_ram_gb > 4 )); then
-            worker_ram_gb=$(pick_previous_tier "$worker_ram_gb" 4 8 12 16 24 32 48 64 96 128)
+        if (( worker_count > 0 && worker_ram_gb > minimum_ram_gb )); then
+            worker_ram_gb=$(pick_previous_tier "$worker_ram_gb" "${memory_tiers[@]}")
             continue
         fi
 
-        if (( cp_ram_gb > 4 )); then
-            cp_ram_gb=$(pick_previous_tier "$cp_ram_gb" 4 8 12 16 24 32 48 64 96 128)
+        if (( cp_ram_gb > minimum_ram_gb )); then
+            cp_ram_gb=$(pick_previous_tier "$cp_ram_gb" "${memory_tiers[@]}")
             continue
         fi
 
@@ -249,53 +282,81 @@ configure_k8s_sizing() {
     local profile_worker_ram_gb="4"
     local total_cpu_selected="0"
     local total_ram_selected_gb="0"
+    local sizing_budget=""
+    local balanced_cpu_budget="0"
+    local minimum_cpu="2"
+    local minimum_ram_gb="4"
+    local -a cpu_tiers=(2 4 6 8 10 12 16)
+    local -a memory_tiers=(4 8 12 16 24 32 48 64 96 128)
 
     if (( node_count < 1 )); then
         echo "Invalid topology. At least one Kubernetes node is required."
         exit 1
     fi
 
-    cpu_total=$(nproc 2>/dev/null || echo 4)
-    ram_total_mb=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+    cpu_total=$(get_host_cpu_count)
+    ram_total_mb=$(get_host_memory_mib)
     host_ram_gb=$(( (ram_total_mb + 1023) / 1024 ))
 
-    reserve_cpu=$(( cpu_total / 5 ))
-    if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
-    usable_cpu=$(( cpu_total - reserve_cpu ))
-    if (( usable_cpu < node_count * 2 )); then usable_cpu=$(( node_count * 2 )); fi
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        if ! sizing_budget=$(get_batch_sizing_budget); then
+            exit 1
+        fi
+        read -r usable_cpu usable_ram_mb <<< "$sizing_budget"
+        minimum_cpu=1
+        minimum_ram_gb=1
+        cpu_tiers=(1 "${cpu_tiers[@]}")
+        memory_tiers=(1 2 3 4 6 8 12 16 24 32 48 64 96 128)
+        if (( usable_cpu < node_count || usable_ram_mb < node_count * 1024 )); then
+            log_warn "Insufficient remaining capacity for ${BATCH_LAB_COUNT} labs with ${node_count} Kubernetes nodes each."
+            exit 1
+        fi
+        balanced_cpu_budget=$(get_balanced_cpu_budget "$usable_cpu" "$node_count")
+    else
+        reserve_cpu=$(( cpu_total / 5 ))
+        if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
+        usable_cpu=$(( cpu_total - reserve_cpu ))
+        if (( usable_cpu < node_count * 2 )); then usable_cpu=$(( node_count * 2 )); fi
 
-    reserve_ram_mb=$(( ram_total_mb / 5 ))
-    if (( reserve_ram_mb < 4096 )); then reserve_ram_mb=4096; fi
-    usable_ram_mb=$(( ram_total_mb - reserve_ram_mb ))
-    if (( usable_ram_mb < node_count * 4096 )); then usable_ram_mb=$(( node_count * 4096 )); fi
+        reserve_ram_mb=$(( ram_total_mb / 5 ))
+        if (( reserve_ram_mb < 4096 )); then reserve_ram_mb=4096; fi
+        usable_ram_mb=$(( ram_total_mb - reserve_ram_mb ))
+        if (( usable_ram_mb < node_count * 4096 )); then usable_ram_mb=$(( node_count * 4096 )); fi
+        balanced_cpu_budget="$usable_cpu"
+    fi
     usable_ram_gb=$(( usable_ram_mb / 1024 ))
 
-    raw_cpu_per_node=$(( usable_cpu / node_count ))
+    raw_cpu_per_node=$(( balanced_cpu_budget / node_count ))
     raw_ram_per_node_gb=$(( usable_ram_gb / node_count ))
-    host_cpu_per_node=$(( cpu_total / node_count ))
-    host_ram_per_node_gb=$(( host_ram_gb / node_count ))
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        host_cpu_per_node=$(( usable_cpu / node_count ))
+        host_ram_per_node_gb=$(( usable_ram_gb / node_count ))
+    else
+        host_cpu_per_node=$(( cpu_total / node_count ))
+        host_ram_per_node_gb=$(( host_ram_gb / node_count ))
+    fi
 
-    balanced_cp_cpu=$(pick_floor_tier "$(round_down_even $(( (raw_cpu_per_node * 125) / 100 )) 2)" 2 4 6 8 10 12 16)
-    balanced_worker_cpu=$(pick_floor_tier "$(round_down_even $(( (raw_cpu_per_node * 90) / 100 )) 2)" 2 4 6 8 10 12 16)
+    balanced_cp_cpu=$(pick_floor_tier "$(round_down_even $(( (raw_cpu_per_node * 125) / 100 )) 2)" "${cpu_tiers[@]}")
+    balanced_worker_cpu=$(pick_floor_tier "$(round_down_even $(( (raw_cpu_per_node * 90) / 100 )) 2)" "${cpu_tiers[@]}")
 
-    balanced_cp_ram_gb=$(pick_floor_tier $(( (raw_ram_per_node_gb * 135) / 100 )) 4 8 12 16 24 32 48 64 96 128)
-    balanced_worker_ram_gb=$(pick_floor_tier $(( (raw_ram_per_node_gb * 85) / 100 )) 4 8 12 16 24 32 48 64 96 128)
+    balanced_cp_ram_gb=$(pick_floor_tier $(( (raw_ram_per_node_gb * 135) / 100 )) "${memory_tiers[@]}")
+    balanced_worker_ram_gb=$(pick_floor_tier $(( (raw_ram_per_node_gb * 85) / 100 )) "${memory_tiers[@]}")
 
     read -r balanced_cp_cpu balanced_cp_ram_gb balanced_worker_cpu balanced_worker_ram_gb < <(
         fit_k8s_profile_to_host \
             "$balanced_cp_cpu" "$balanced_cp_ram_gb" "$balanced_worker_cpu" "$balanced_worker_ram_gb" \
-            "$cp_count" "$worker_count" "$usable_cpu" "$usable_ram_gb"
+            "$cp_count" "$worker_count" "$balanced_cpu_budget" "$usable_ram_gb" "$minimum_cpu" "$minimum_ram_gb"
     )
 
-    conservative_cp_cpu=$(pick_previous_tier "$balanced_cp_cpu" 2 4 6 8 10 12 16)
-    conservative_worker_cpu=$(pick_previous_tier "$balanced_worker_cpu" 2 4 6 8 10 12 16)
-    conservative_cp_ram_gb=$(pick_previous_tier "$balanced_cp_ram_gb" 4 8 12 16 24 32 48 64 96 128)
-    conservative_worker_ram_gb=$(pick_previous_tier "$balanced_worker_ram_gb" 4 8 12 16 24 32 48 64 96 128)
+    conservative_cp_cpu=$(pick_previous_tier "$balanced_cp_cpu" "${cpu_tiers[@]}")
+    conservative_worker_cpu=$(pick_previous_tier "$balanced_worker_cpu" "${cpu_tiers[@]}")
+    conservative_cp_ram_gb=$(pick_previous_tier "$balanced_cp_ram_gb" "${memory_tiers[@]}")
+    conservative_worker_ram_gb=$(pick_previous_tier "$balanced_worker_ram_gb" "${memory_tiers[@]}")
 
-    performance_cp_cpu=$(pick_next_tier "$balanced_cp_cpu" "$(round_down_even "$host_cpu_per_node" "$balanced_cp_cpu")" 2 4 6 8 10 12 16)
-    performance_worker_cpu=$(pick_next_tier "$balanced_worker_cpu" "$(round_down_even "$host_cpu_per_node" "$balanced_worker_cpu")" 2 4 6 8 10 12 16)
-    performance_cp_ram_gb=$(pick_next_tier "$balanced_cp_ram_gb" "$(pick_floor_tier "$host_ram_per_node_gb" 4 8 12 16 24 32 48 64 96 128)" 4 8 12 16 24 32 48 64 96 128)
-    performance_worker_ram_gb=$(pick_next_tier "$balanced_worker_ram_gb" "$(pick_floor_tier "$host_ram_per_node_gb" 4 8 12 16 24 32 48 64 96 128)" 4 8 12 16 24 32 48 64 96 128)
+    performance_cp_cpu=$(pick_next_tier "$balanced_cp_cpu" "$(round_down_even "$host_cpu_per_node" "$balanced_cp_cpu")" "${cpu_tiers[@]}")
+    performance_worker_cpu=$(pick_next_tier "$balanced_worker_cpu" "$(round_down_even "$host_cpu_per_node" "$balanced_worker_cpu")" "${cpu_tiers[@]}")
+    performance_cp_ram_gb=$(pick_next_tier "$balanced_cp_ram_gb" "$(pick_floor_tier "$host_ram_per_node_gb" "${memory_tiers[@]}")" "${memory_tiers[@]}")
+    performance_worker_ram_gb=$(pick_next_tier "$balanced_worker_ram_gb" "$(pick_floor_tier "$host_ram_per_node_gb" "${memory_tiers[@]}")" "${memory_tiers[@]}")
 
     # Performance must never be weaker than balanced.
     if ((
@@ -312,6 +373,14 @@ configure_k8s_sizing() {
     print_kv "Topology" "${cp_count} control-plane, ${worker_count} worker"
     print_kv "Host CPU cores" "${cpu_total}"
     print_kv "Host RAM" "${host_ram_gb} GB"
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        print_kv "Identical labs" "$BATCH_LAB_COUNT"
+        print_kv "K8s CPU budget per lab" "${usable_cpu} vCPU"
+        print_kv "K8s RAM budget per lab" "${usable_ram_gb} GiB"
+        if [[ "$scenario" == "k8s-juju" ]]; then
+            print_kv "Juju controller per lab" "2 vCPU / 4 GiB already reserved"
+        fi
+    fi
     echo ""
     print_k8s_sizing_table_header
 
@@ -398,6 +467,13 @@ configure_k8s_sizing() {
         fi
     done
 
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        profile_cp_cpu=$(normalize_decimal "$profile_cp_cpu")
+        profile_cp_ram_gb=$(normalize_decimal "$profile_cp_ram_gb")
+        profile_worker_cpu=$(normalize_decimal "$profile_worker_cpu")
+        profile_worker_ram_gb=$(normalize_decimal "$profile_worker_ram_gb")
+    fi
+
     if (( profile_cp_cpu < 1 || profile_cp_ram_gb < 1 )); then
         echo "Invalid control-plane sizing bounds. Minimums: cpu>=1, memory>=1GB."
         exit 1
@@ -408,11 +484,21 @@ configure_k8s_sizing() {
         exit 1
     fi
 
-    read -r profile_cp_cpu profile_cp_ram_gb profile_worker_cpu profile_worker_ram_gb < <(
-        fit_k8s_profile_to_host \
-            "$profile_cp_cpu" "$profile_cp_ram_gb" "$profile_worker_cpu" "$profile_worker_ram_gb" \
-            "$cp_count" "$worker_count" "$usable_cpu" "$usable_ram_gb"
-    )
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        total_cpu_selected=$((cp_count * profile_cp_cpu + worker_count * profile_worker_cpu))
+        total_ram_selected_gb=$((cp_count * profile_cp_ram_gb + worker_count * profile_worker_ram_gb))
+        if (( total_cpu_selected > usable_cpu || total_ram_selected_gb * 1024 > usable_ram_mb )); then
+            log_warn "Selected K8s profile requires ${total_cpu_selected} vCPU/${total_ram_selected_gb} GiB per lab; the remaining node budget is ${usable_cpu} vCPU/${usable_ram_gb} GiB per lab."
+            log_warn "Values were not resized. Choose a smaller profile or fewer labs."
+            exit 1
+        fi
+    else
+        read -r profile_cp_cpu profile_cp_ram_gb profile_worker_cpu profile_worker_ram_gb < <(
+            fit_k8s_profile_to_host \
+                "$profile_cp_cpu" "$profile_cp_ram_gb" "$profile_worker_cpu" "$profile_worker_ram_gb" \
+                "$cp_count" "$worker_count" "$usable_cpu" "$usable_ram_gb"
+        )
+    fi
 
     K8S_CONTROL_PLANE_CPU="$profile_cp_cpu"
     K8S_CONTROL_PLANE_MEMORY_GIB="$profile_cp_ram_gb"
@@ -516,20 +602,32 @@ configure_microcloud_sizing() {
     local selected_total_memory_mb="0"
     local selected_total_disk_gib="0"
     local per_node_extra_disk_gib="0"
+    local sizing_budget=""
+    local balanced_cpu_budget="0"
+    local suggested_disk_gib="0"
 
-    cpu_total=$(nproc 2>/dev/null || echo 4)
-    ram_total_mb=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+    cpu_total=$(get_host_cpu_count)
+    ram_total_mb=$(get_host_memory_mib)
     storage_available_gib=$(get_storage_available_gib)
     host_ram_gb=$(( (ram_total_mb + 1023) / 1024 ))
     host_ram_per_node_gb=$(( host_ram_gb / node_count ))
 
-    reserve_cpu=$(( cpu_total / 5 ))
-    if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
-    usable_cpu=$(( cpu_total - reserve_cpu ))
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        if ! sizing_budget=$(get_batch_sizing_budget); then
+            exit 1
+        fi
+        read -r usable_cpu usable_ram_mb <<< "$sizing_budget"
+        balanced_cpu_budget=$(get_balanced_cpu_budget "$usable_cpu" "$node_count")
+    else
+        reserve_cpu=$(( cpu_total / 5 ))
+        if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
+        usable_cpu=$(( cpu_total - reserve_cpu ))
 
-    reserve_ram_mb=$(( ram_total_mb / 5 ))
-    if (( reserve_ram_mb < 4096 )); then reserve_ram_mb=4096; fi
-    usable_ram_mb=$(( ram_total_mb - reserve_ram_mb ))
+        reserve_ram_mb=$(( ram_total_mb / 5 ))
+        if (( reserve_ram_mb < 4096 )); then reserve_ram_mb=4096; fi
+        usable_ram_mb=$(( ram_total_mb - reserve_ram_mb ))
+        balanced_cpu_budget="$usable_cpu"
+    fi
 
     usable_disk_gib=$(( storage_available_gib - 20 ))
     if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
@@ -537,12 +635,12 @@ configure_microcloud_sizing() {
     fi
 
     if (( usable_cpu < node_count )); then
-        echo "Insufficient host CPU for ${node_count} MicroCloud nodes after host reserve (${usable_cpu} vCPU available)."
+        echo "Insufficient CPU for ${node_count} MicroCloud nodes per lab (${usable_cpu} vCPU available)."
         exit 1
     fi
 
     if (( usable_ram_mb < node_count * 1024 )); then
-        echo "Insufficient host RAM for ${node_count} MicroCloud nodes after host reserve (${usable_ram_mb} MB available)."
+        echo "Insufficient RAM for ${node_count} MicroCloud nodes per lab (${usable_ram_mb} MiB available)."
         exit 1
     fi
 
@@ -555,27 +653,44 @@ configure_microcloud_sizing() {
     balanced_root_gib=40
     performance_root_gib=50
 
-    raw_balanced_cpu=$(( usable_cpu / node_count ))
-    balanced_cpu=$(round_down_even "$raw_balanced_cpu" 2)
+    raw_balanced_cpu=$(( balanced_cpu_budget / node_count ))
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" && "$raw_balanced_cpu" -lt 2 ]]; then
+        balanced_cpu=1
+    else
+        balanced_cpu=$(round_down_even "$raw_balanced_cpu" 2)
+    fi
     conservative_cpu=$(( balanced_cpu - 2 ))
     if (( conservative_cpu < 1 )); then conservative_cpu=1; fi
-    performance_cpu_limit=$(round_down_even $(( usable_cpu / node_count )) "$balanced_cpu")
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" && $((usable_cpu / node_count)) -lt 2 ]]; then
+        performance_cpu_limit=1
+    else
+        performance_cpu_limit=$(round_down_even $(( usable_cpu / node_count )) "$balanced_cpu")
+    fi
     performance_cpu=$(( balanced_cpu + 2 ))
     if (( performance_cpu > performance_cpu_limit )); then
         performance_cpu="$performance_cpu_limit"
     fi
 
     raw_balanced_memory_gb=$(( usable_ram_mb / (node_count * 1024) ))
-    balanced_memory_gb=$(pick_floor_tier "$raw_balanced_memory_gb" 8 12 16 24 32 48 64 96 128)
-    conservative_memory_gb=$(pick_previous_tier "$balanced_memory_gb" 4 8 12 16 24 32 48 64 96 128)
-    performance_memory_cap_gb=$(pick_floor_tier "$host_ram_per_node_gb" 8 12 16 24 32 48 64 96 128)
-    performance_memory_gb=$(pick_next_tier "$balanced_memory_gb" "$performance_memory_cap_gb" 4 8 12 16 24 32 48 64 96 128)
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        balanced_memory_gb=$(pick_floor_tier "$raw_balanced_memory_gb" 1 2 3 4 6 8 12 16 24 32 48 64 96 128)
+        conservative_memory_gb=$(pick_previous_tier "$balanced_memory_gb" 1 2 3 4 6 8 12 16 24 32 48 64 96 128)
+        performance_memory_cap_gb="$raw_balanced_memory_gb"
+        performance_memory_gb=$(pick_next_tier "$balanced_memory_gb" "$performance_memory_cap_gb" 1 2 3 4 6 8 12 16 24 32 48 64 96 128)
+        suggested_disk_gib=$((usable_disk_gib / BATCH_LAB_COUNT))
+    else
+        balanced_memory_gb=$(pick_floor_tier "$raw_balanced_memory_gb" 8 12 16 24 32 48 64 96 128)
+        conservative_memory_gb=$(pick_previous_tier "$balanced_memory_gb" 4 8 12 16 24 32 48 64 96 128)
+        performance_memory_cap_gb=$(pick_floor_tier "$host_ram_per_node_gb" 8 12 16 24 32 48 64 96 128)
+        performance_memory_gb=$(pick_next_tier "$balanced_memory_gb" "$performance_memory_cap_gb" 4 8 12 16 24 32 48 64 96 128)
+        suggested_disk_gib="$usable_disk_gib"
+    fi
 
-    raw_balanced_ceph_gib=$(( (usable_disk_gib / node_count) - balanced_root_gib - per_node_extra_disk_gib ))
+    raw_balanced_ceph_gib=$(( (suggested_disk_gib / node_count) - balanced_root_gib - per_node_extra_disk_gib ))
     if (( raw_balanced_ceph_gib < 20 )); then raw_balanced_ceph_gib=20; fi
     balanced_ceph_gib=$(pick_floor_tier "$raw_balanced_ceph_gib" 20 50 100 150 200 250 300 400 500)
     conservative_ceph_gib=$(pick_previous_tier "$balanced_ceph_gib" 20 50 100 150 200 250 300 400 500)
-    performance_ceph_cap_gib=$(( (usable_disk_gib / node_count) - performance_root_gib - per_node_extra_disk_gib ))
+    performance_ceph_cap_gib=$(( (suggested_disk_gib / node_count) - performance_root_gib - per_node_extra_disk_gib ))
     if (( performance_ceph_cap_gib < 20 )); then performance_ceph_cap_gib=20; fi
     performance_cpu_cap=$(pick_floor_tier "$performance_ceph_cap_gib" 20 50 100 150 200 250 300 400 500)
     performance_ceph_gib=$(pick_next_tier "$balanced_ceph_gib" "$performance_cpu_cap" 20 50 100 150 200 250 300 400 500)
@@ -589,6 +704,11 @@ configure_microcloud_sizing() {
     print_kv "Host CPU cores" "${cpu_total}"
     print_kv "Host RAM" "${host_ram_gb} GB"
     print_kv "Storage (pool ${LXD_STORAGE_POOL})" "${storage_available_gib} GB"
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        print_kv "Identical labs" "$BATCH_LAB_COUNT"
+        print_kv "CPU budget per lab" "${usable_cpu} vCPU"
+        print_kv "RAM budget per lab" "$((usable_ram_mb / 1024)) GiB"
+    fi
     echo ""
     print_sizing_table_header
     print_sizing_table_row "balanced" "${balanced_cpu}" "${balanced_memory_gb} GB" "${balanced_root_gib} GB" "${balanced_ceph_gib} GB" "default" "$GREEN"
@@ -633,6 +753,9 @@ configure_microcloud_sizing() {
                 echo "Invalid MicroCloud memory input. Enter memory as a whole number in GB."
                 exit 1
             fi
+            if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+                MICROCLOUD_NODE_MEMORY_GB=$(normalize_decimal "$MICROCLOUD_NODE_MEMORY_GB")
+            fi
             MICROCLOUD_NODE_MEMORY_MB=$(( MICROCLOUD_NODE_MEMORY_GB * 1024 ))
 
             echo ""
@@ -656,6 +779,12 @@ configure_microcloud_sizing() {
         fi
     done
 
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        MICROCLOUD_NODE_CPU=$(normalize_decimal "$MICROCLOUD_NODE_CPU")
+        MICROCLOUD_ROOT_DISK_GIB=$(normalize_decimal "$MICROCLOUD_ROOT_DISK_GIB")
+        MICROCLOUD_CEPH_DISK_GIB=$(normalize_decimal "$MICROCLOUD_CEPH_DISK_GIB")
+    fi
+
     if (( MICROCLOUD_NODE_CPU < 1 || MICROCLOUD_NODE_MEMORY_MB < 1024 || MICROCLOUD_ROOT_DISK_GIB < 20 || MICROCLOUD_CEPH_DISK_GIB < 10 )); then
         echo "Invalid MicroCloud sizing bounds. Minimums: cpu>=1, memory>=1GB, root>=20GB, ceph>=10GB."
         exit 1
@@ -666,12 +795,12 @@ configure_microcloud_sizing() {
     selected_total_disk_gib=$(( node_count * (MICROCLOUD_ROOT_DISK_GIB + MICROCLOUD_CEPH_DISK_GIB + per_node_extra_disk_gib) ))
 
     if (( selected_total_cpu > usable_cpu )); then
-        echo "Selected MicroCloud profile requires ${selected_total_cpu} vCPU, but only ${usable_cpu} vCPU are available after host reserve."
+        echo "Selected MicroCloud profile requires ${selected_total_cpu} vCPU per lab, but only ${usable_cpu} vCPU remain in the sizing budget."
         exit 1
     fi
 
     if (( selected_total_memory_mb > usable_ram_mb )); then
-        echo "Selected MicroCloud profile requires ${selected_total_memory_mb} MB RAM, but only ${usable_ram_mb} MB are available after host reserve."
+        echo "Selected MicroCloud profile requires ${selected_total_memory_mb} MiB RAM per lab, but only ${usable_ram_mb} MiB remain in the sizing budget."
         exit 1
     fi
 
@@ -979,6 +1108,717 @@ configure_microcloud_network_mode() {
         print_kv "eth0" "Management, SSH, and cluster traffic"
         print_kv "eth1" "IP-free external OVN uplink"
     fi
+}
+
+generate_batch_lab_names() {
+    local base_prefix="$1"
+    local lab_count="$2"
+    local workspace_suffix="$3"
+    local width="${#lab_count}"
+    local index=""
+    local suffix=""
+    local prefix=""
+
+    if (( width < 2 )); then
+        width=2
+    fi
+
+    for ((index = 1; index <= lab_count; index++)); do
+        printf -v suffix "%0${width}d" "$index"
+        prefix="${base_prefix}${suffix}"
+        printf '%s %s %s\n' \
+            "$prefix" \
+            "${prefix}_${workspace_suffix}" \
+            "inventory_${prefix}_${workspace_suffix}.yaml"
+    done
+}
+
+normalize_decimal() {
+    local raw_value="$1"
+
+    [[ "$raw_value" =~ ^[0-9]+$ ]] || return 1
+    echo $((10#$raw_value))
+}
+
+cpu_limit_to_count() {
+    local raw_limit="$1"
+
+    python3 - "$raw_limit" <<'PY'
+import re
+import sys
+
+raw = sys.argv[1].strip()
+if raw.isdigit():
+    if int(raw) == 0:
+        print("CPU limit must be positive", file=sys.stderr)
+        raise SystemExit(1)
+    print(int(raw))
+    raise SystemExit
+
+cpus = set()
+try:
+    for item in raw.split(","):
+        item = item.strip()
+        if not re.fullmatch(r"[0-9]+(?:-[0-9]+)?", item):
+            raise ValueError("expected a positive CPU count or CPU set")
+        if "-" in item:
+            start, end = item.split("-", 1)
+            if int(start) > int(end):
+                raise ValueError("CPU range starts after it ends")
+            cpus.update(range(int(start), int(end) + 1))
+        else:
+            cpus.add(int(item))
+except ValueError as exc:
+    print(f"Cannot interpret CPU limit {raw!r}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(len(cpus))
+PY
+}
+
+memory_limit_to_mib() {
+    local raw_limit="$1"
+
+    python3 - "$raw_limit" <<'PY'
+from decimal import Decimal, ROUND_CEILING
+import re
+import sys
+
+raw = sys.argv[1].strip()
+match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([KMGTPE]?i?B)?", raw, re.IGNORECASE)
+if not match:
+    print(f"Cannot interpret memory limit {raw!r}", file=sys.stderr)
+    raise SystemExit(1)
+
+value = Decimal(match.group(1))
+unit = (match.group(2) or "B").lower()
+if value <= 0:
+    print("Memory limit must be positive", file=sys.stderr)
+    raise SystemExit(1)
+
+factors = {"b": 1}
+for exponent, prefix in enumerate("kmgtpe", start=1):
+    factors[prefix + "b"] = 1000**exponent
+    factors[prefix + "ib"] = 1024**exponent
+
+mib = value * factors[unit] / (1024 * 1024)
+print(int(mib.to_integral_value(rounding=ROUND_CEILING)))
+PY
+}
+
+is_batch_target_instance() {
+    local instance_name="$1"
+    local workspace_name=""
+    local lxd_prefix=""
+
+    for workspace_name in "${BATCH_WORKSPACE_NAMES[@]}"; do
+        lxd_prefix="${workspace_name//_/-}"
+        if [[ "$instance_name" == "${lxd_prefix}-"* ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+get_existing_lxd_commitments() {
+    local instance_name=""
+    local cpu_limit=""
+    local memory_limit=""
+    local cpu_count="0"
+    local memory_mib="0"
+    local total_cpu="0"
+    local total_memory_mib="0"
+    local instances=""
+
+    if ! instances=$(lxc list --format csv -c n); then
+        log_warn "Could not list existing LXD instances for batch capacity accounting." >&2
+        return 1
+    fi
+
+    while IFS= read -r instance_name; do
+        [[ -z "$instance_name" ]] && continue
+        if is_batch_target_instance "$instance_name"; then
+            continue
+        fi
+
+        if ! cpu_limit=$(lxc config get "$instance_name" limits.cpu --expanded) \
+            || ! memory_limit=$(lxc config get "$instance_name" limits.memory --expanded); then
+            log_warn "Could not read effective resource limits for ${instance_name}; batch sizing cannot safely continue." >&2
+            return 1
+        fi
+        if ! cpu_count=$(cpu_limit_to_count "$cpu_limit") \
+            || ! memory_mib=$(memory_limit_to_mib "$memory_limit"); then
+            log_warn "Existing instance ${instance_name} needs explicit, readable CPU and memory limits before batch sizing." >&2
+            return 1
+        fi
+
+        total_cpu=$((total_cpu + cpu_count))
+        total_memory_mib=$((total_memory_mib + memory_mib))
+    done <<< "$instances"
+
+    echo "${total_cpu} ${total_memory_mib}"
+}
+
+get_batch_resource_request() {
+    local lab_count="$1"
+    local vm_count="0"
+    local cpu_count="0"
+    local memory_mib="0"
+    local disk_gib="0"
+    local per_lab_disk_gib="0"
+
+    case "$scenario" in
+        microcloud)
+            vm_count=$((lab_count * MICROCLOUD_NODE_COUNT))
+            cpu_count=$((vm_count * MICROCLOUD_NODE_CPU))
+            memory_mib=$((vm_count * MICROCLOUD_NODE_MEMORY_MB))
+            per_lab_disk_gib=$((MICROCLOUD_NODE_COUNT * (MICROCLOUD_ROOT_DISK_GIB + MICROCLOUD_CEPH_DISK_GIB)))
+            if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+                per_lab_disk_gib=$((per_lab_disk_gib + MICROCLOUD_NODE_COUNT * MICROCLOUD_LOCAL_DISK_GIB))
+            fi
+            disk_gib=$((lab_count * per_lab_disk_gib))
+            ;;
+        k8s-snap)
+            vm_count=$((lab_count * (k8s_control_plane_count + k8s_worker_count)))
+            cpu_count=$((lab_count * ((k8s_control_plane_count * K8S_CONTROL_PLANE_CPU) + (k8s_worker_count * K8S_WORKER_CPU))))
+            memory_mib=$((lab_count * 1024 * ((k8s_control_plane_count * K8S_CONTROL_PLANE_MEMORY_GIB) + (k8s_worker_count * K8S_WORKER_MEMORY_GIB))))
+            disk_gib=$((vm_count * MICROCLOUD_ROOT_DISK_GIB))
+            ;;
+        k8s-juju)
+            vm_count=$((lab_count * (1 + k8s_juju_cp_count + k8s_juju_worker_count)))
+            cpu_count=$((lab_count * (2 + (k8s_juju_cp_count * K8S_JUJU_CP_CPU) + (k8s_juju_worker_count * K8S_JUJU_WORKER_CPU))))
+            memory_mib=$((lab_count * 1024 * (4 + (k8s_juju_cp_count * K8S_JUJU_CP_MEMORY_GIB) + (k8s_juju_worker_count * K8S_JUJU_WORKER_MEMORY_GIB))))
+            disk_gib=$((vm_count * MICROCLOUD_ROOT_DISK_GIB))
+            ;;
+    esac
+
+    echo "${vm_count} ${cpu_count} ${memory_mib} ${disk_gib}"
+}
+
+get_management_network_capacity() {
+    local network_cidr=""
+    local dhcp_ranges=""
+
+    network_cidr=$(lxc network get "$LXD_NETWORK_NAME" ipv4.address 2>/dev/null || true)
+    dhcp_ranges=$(lxc network get "$LXD_NETWORK_NAME" ipv4.dhcp.ranges 2>/dev/null || true)
+    python3 - "$network_cidr" "$dhcp_ranges" <<'PY'
+import ipaddress
+import sys
+
+try:
+    network = ipaddress.ip_network(sys.argv[1], strict=False)
+except ValueError:
+    print(0)
+    raise SystemExit
+
+if network.version != 4:
+    print(0)
+    raise SystemExit
+
+ranges = sys.argv[2].strip()
+if ranges:
+    total = 0
+    try:
+        for value in ranges.split(","):
+            start, end = value.strip().split("-", 1)
+            total += int(ipaddress.ip_address(end)) - int(ipaddress.ip_address(start)) + 1
+    except ValueError:
+        print(0)
+        raise SystemExit
+    print(total)
+else:
+    # Exclude the network, broadcast, and bridge gateway addresses.
+    print(max(0, network.num_addresses - 3))
+PY
+}
+
+count_management_network_instances() {
+    local instance_name=""
+    local count="0"
+
+    while IFS= read -r instance_name; do
+        [[ -z "$instance_name" ]] && continue
+        if is_batch_target_instance "$instance_name"; then
+            continue
+        fi
+        count=$((count + 1))
+    done < <(
+        lxc network show "$LXD_NETWORK_NAME" 2>/dev/null \
+            | sed -n 's|^[[:space:]]*-[[:space:]]*/1.0/instances/\([^/?]*\).*|\1|p'
+    )
+
+    echo "$count"
+}
+
+get_host_cpu_count() {
+    nproc
+}
+
+get_host_memory_mib() {
+    awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo
+}
+
+get_batch_capacity() {
+    local host_cpu=""
+    local host_memory_mib=""
+    local existing_cpu=""
+    local existing_memory_mib=""
+    local commitments=""
+    local cpu_ceiling="0"
+    local memory_budget_mib="0"
+
+    if ! host_cpu=$(get_host_cpu_count) \
+        || ! host_memory_mib=$(get_host_memory_mib); then
+        log_warn "Could not read host CPU and memory capacity." >&2
+        return 1
+    fi
+    if ! [[ "$host_cpu" =~ ^[0-9]+$ && "$host_memory_mib" =~ ^[0-9]+$ ]] \
+        || (( host_cpu < 1 || host_memory_mib < 1 )); then
+        log_warn "Invalid host capacity: cpu=${host_cpu:-missing}, memory=${host_memory_mib:-missing} MiB." >&2
+        return 1
+    fi
+
+    if ! commitments=$(get_existing_lxd_commitments); then
+        return 1
+    fi
+    if ! read -r existing_cpu existing_memory_mib <<< "$commitments" \
+        || ! [[ "$existing_cpu" =~ ^[0-9]+$ && "$existing_memory_mib" =~ ^[0-9]+$ ]]; then
+        log_warn "Could not interpret existing LXD resource commitments." >&2
+        return 1
+    fi
+
+    cpu_ceiling=$((host_cpu * BATCH_CPU_OVERCOMMIT_LIMIT))
+    memory_budget_mib=$((host_memory_mib * 100 / (100 + BATCH_RAM_OVERHEAD_PERCENT)))
+    if (( host_memory_mib - memory_budget_mib < 4096 )); then
+        memory_budget_mib=$((host_memory_mib - 4096))
+    fi
+    if (( memory_budget_mib < 0 )); then
+        memory_budget_mib=0
+    fi
+
+    echo "${host_cpu} ${host_memory_mib} ${cpu_ceiling} ${memory_budget_mib} ${existing_cpu} ${existing_memory_mib}"
+}
+
+get_batch_sizing_budget() {
+    local capacity=""
+    local host_cpu=""
+    local host_memory_mib=""
+    local cpu_ceiling=""
+    local memory_budget_mib=""
+    local existing_cpu=""
+    local existing_memory_mib=""
+    local usable_cpu="0"
+    local usable_memory_mib="0"
+
+    if ! capacity=$(get_batch_capacity); then
+        return 1
+    fi
+    read -r host_cpu host_memory_mib cpu_ceiling memory_budget_mib existing_cpu existing_memory_mib <<< "$capacity"
+
+    if (( BATCH_LAB_COUNT < 1 || existing_cpu >= cpu_ceiling || existing_memory_mib >= memory_budget_mib )); then
+        log_warn "No remaining host CPU/RAM budget for this batch after existing LXD commitments and host overhead." >&2
+        return 1
+    fi
+
+    usable_cpu=$(((cpu_ceiling - existing_cpu) / BATCH_LAB_COUNT))
+    usable_memory_mib=$(((memory_budget_mib - existing_memory_mib) / BATCH_LAB_COUNT))
+    if [[ "$scenario" == "k8s-juju" ]]; then
+        usable_cpu=$((usable_cpu - 2))
+        usable_memory_mib=$((usable_memory_mib - 4096))
+    fi
+    if (( usable_cpu < 1 || usable_memory_mib < 1024 )); then
+        log_warn "The remaining capacity cannot support ${BATCH_LAB_COUNT} labs, including any Juju controller overhead." >&2
+        return 1
+    fi
+
+    echo "${usable_cpu} ${usable_memory_mib}"
+}
+
+print_batch_capacity_plan() {
+    local existing_cpu="0"
+    local existing_memory_mib="0"
+    local requested_vms="0"
+    local requested_cpu="0"
+    local requested_memory_mib="0"
+    local requested_disk_gib="0"
+    local host_cpu="0"
+    local host_memory_mib="0"
+    local host_memory_gib="0"
+    local host_reserve_mib="0"
+    local memory_budget_mib="0"
+    local cpu_ceiling="0"
+    local after_cpu="0"
+    local after_memory_mib="0"
+    local management_capacity="0"
+    local current_instances="0"
+    local cpu_ratio=""
+    local storage_available_gib="0"
+    local capacity=""
+    local resource_request=""
+
+    if ! capacity=$(get_batch_capacity) \
+        || ! resource_request=$(get_batch_resource_request "$BATCH_LAB_COUNT"); then
+        return 1
+    fi
+    read -r host_cpu host_memory_mib cpu_ceiling memory_budget_mib existing_cpu existing_memory_mib <<< "$capacity"
+    read -r requested_vms requested_cpu requested_memory_mib requested_disk_gib <<< "$resource_request"
+
+    host_memory_gib=$(( (host_memory_mib + 1023) / 1024 ))
+    host_reserve_mib=$((host_memory_mib - memory_budget_mib))
+    after_cpu=$((existing_cpu + requested_cpu))
+    after_memory_mib=$((existing_memory_mib + requested_memory_mib))
+    cpu_ratio=$(awk -v committed="$after_cpu" -v physical="$host_cpu" 'BEGIN {printf "%.2f:1", committed / physical}')
+    storage_available_gib=$(get_storage_available_gib)
+
+    print_section "Batch Capacity Plan"
+    print_kv "Labs" "$BATCH_LAB_COUNT"
+    print_kv "New virtual machines" "$requested_vms"
+    print_kv "Physical CPU threads" "$host_cpu"
+    print_kv "CPU commit ceiling" "${cpu_ceiling} vCPU (${BATCH_CPU_OVERCOMMIT_LIMIT}:1 internal limit)"
+    print_kv "Already committed CPU" "${existing_cpu} vCPU"
+    print_kv "Requested CPU" "${requested_cpu} vCPU"
+    print_kv "CPU after deployment" "${after_cpu} vCPU (${cpu_ratio})"
+    print_kv "CPU policy" "Shared lab capacity, not guaranteed dedicated CPU"
+    print_kv "Physical RAM" "${host_memory_gib} GiB"
+    print_kv "Host RAM overhead" "$(( (host_reserve_mib + 1023) / 1024 )) GiB (${BATCH_RAM_OVERHEAD_PERCENT}% above VM commitment)"
+    print_kv "Already committed RAM" "$(( (existing_memory_mib + 1023) / 1024 )) GiB"
+    print_kv "Requested RAM" "$(( (requested_memory_mib + 1023) / 1024 )) GiB"
+    print_kv "RAM after deployment" "$(( (after_memory_mib + 1023) / 1024 )) GiB"
+    if (( requested_disk_gib > 0 )); then
+        print_kv "Logical disk requested" "${requested_disk_gib} GiB"
+        print_kv "Current physical storage free" "${storage_available_gib} GiB"
+        print_kv "Storage note" "LXD block volumes may be thin/sparse; monitor physical usage"
+        if (( requested_disk_gib > storage_available_gib )); then
+            log_warn "The batch requests more logical disk than current physical free space. This requires thin/sparse provisioning and active storage monitoring."
+        fi
+    fi
+
+    if (( after_cpu > cpu_ceiling )); then
+        log_warn "Batch CPU commitment (${after_cpu} vCPU) exceeds the internal ${BATCH_CPU_OVERCOMMIT_LIMIT}:1 ceiling (${cpu_ceiling} vCPU)."
+        return 1
+    fi
+
+    if (( after_memory_mib > memory_budget_mib )); then
+        log_warn "Batch RAM commitment ($(( (after_memory_mib + 1023) / 1024 )) GiB) exceeds the host VM budget ($(( (memory_budget_mib + 1023) / 1024 )) GiB)."
+        return 1
+    fi
+
+    management_capacity=$(get_management_network_capacity)
+    current_instances=$(count_management_network_instances)
+    if (( management_capacity > 0 && current_instances + requested_vms > management_capacity )); then
+        log_warn "The management subnet has approximately ${management_capacity} usable addresses, but existing and requested instances total $((current_instances + requested_vms))."
+        return 1
+    fi
+
+    log_success "Batch CPU, RAM, and management network admission checks passed."
+}
+
+confirm_batch_plan() {
+    local confirmation=""
+
+    echo ""
+    read -p "Type 'yes' to start this sequential batch deployment: " confirmation
+    if [[ "$confirmation" != "yes" ]]; then
+        echo "Cancelled."
+        return 1
+    fi
+}
+
+cidr_overlaps_inventory() {
+    local candidate="$1"
+    shift
+    local existing_subnet=""
+
+    while IFS= read -r existing_subnet; do
+        [[ -z "$existing_subnet" ]] && continue
+        if subnets_overlap "$candidate" "$existing_subnet"; then
+            return 0
+        fi
+    done < <(list_host_ipv4_subnets | sort -u)
+
+    for existing_subnet in "$@"; do
+        [[ -z "$existing_subnet" ]] && continue
+        if subnets_overlap "$candidate" "$existing_subnet"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+allocate_batch_microcloud_cidrs() {
+    local workspace_name=""
+    local workspace_hash=""
+    local start_slot="0"
+    local offset="0"
+    local slot="0"
+    local ovn_cidr=""
+    local ceph_cidr=""
+    local ovn_network_name=""
+    local ceph_network_name=""
+    local existing_owner=""
+    local external_cidr=""
+    local allocated=false
+    local -a reserved_cidrs=()
+
+    if [[ "$(lxc network get "$LXD_NETWORK_NAME" ipv4.address 2>/dev/null || true)" == 10.* ]]; then
+        external_cidr="192.168.250.0/24"
+    else
+        external_cidr="10.250.1.0/24"
+    fi
+
+    if cidr_overlaps_inventory "$external_cidr"; then
+        log_warn "Planned OVN external subnet ${external_cidr} overlaps a host or LXD subnet."
+        return 1
+    fi
+
+    BATCH_OVN_UNDERLAY_CIDRS=()
+    BATCH_CEPH_GENERAL_CIDRS=()
+
+    for workspace_name in "${BATCH_WORKSPACE_NAMES[@]}"; do
+        ovn_network_name=$(resolve_microcloud_plane_network_name "$workspace_name" "ovn")
+        ceph_network_name=$(resolve_microcloud_plane_network_name "$workspace_name" "ceph")
+        existing_owner=$(lxc network get "$ovn_network_name" user.lab-automation.owner 2>/dev/null || true)
+
+        if [[ "$existing_owner" == "$workspace_name" \
+            && "$(lxc network get "$ceph_network_name" user.lab-automation.owner 2>/dev/null || true)" == "$workspace_name" ]]; then
+            ovn_cidr=$(lxc network get "$ovn_network_name" user.lab-automation.cidr 2>/dev/null || true)
+            ceph_cidr=$(lxc network get "$ceph_network_name" user.lab-automation.cidr 2>/dev/null || true)
+            if validate_microcloud_cidr "$ovn_cidr" "$MICROCLOUD_NODE_COUNT" >/dev/null 2>&1 \
+                && validate_microcloud_cidr "$ceph_cidr" "$MICROCLOUD_NODE_COUNT" >/dev/null 2>&1; then
+                BATCH_OVN_UNDERLAY_CIDRS+=("$ovn_cidr")
+                BATCH_CEPH_GENERAL_CIDRS+=("$ceph_cidr")
+                reserved_cidrs+=("$ovn_cidr" "$ceph_cidr")
+                continue
+            fi
+        fi
+
+        workspace_hash=$(printf '%s' "$workspace_name" | md5sum | awk '{print $1}')
+        start_slot=$((16#${workspace_hash:0:2} % 240 + 10))
+        allocated=false
+
+        for ((offset = 0; offset < 240; offset++)); do
+            slot=$(( ((start_slot - 10 + offset) % 240) + 10 ))
+            ovn_cidr="172.28.${slot}.0/24"
+            ceph_cidr="172.29.${slot}.0/24"
+
+            if cidr_overlaps_inventory "$ovn_cidr" "${reserved_cidrs[@]}"; then
+                continue
+            fi
+            if cidr_overlaps_inventory "$ceph_cidr" "${reserved_cidrs[@]}"; then
+                continue
+            fi
+            if subnets_overlap "$ovn_cidr" "$external_cidr" || subnets_overlap "$ceph_cidr" "$external_cidr"; then
+                continue
+            fi
+
+            BATCH_OVN_UNDERLAY_CIDRS+=("$ovn_cidr")
+            BATCH_CEPH_GENERAL_CIDRS+=("$ceph_cidr")
+            reserved_cidrs+=("$ovn_cidr" "$ceph_cidr")
+            allocated=true
+            break
+        done
+
+        if [[ "$allocated" != true ]]; then
+            log_warn "Could not allocate collision-free OVN and Ceph CIDRs for ${workspace_name}."
+            return 1
+        fi
+    done
+}
+
+configure_microcloud_batch_network_mode() {
+    local mode_choice=""
+    local index=""
+
+    print_section "MicroCloud Network Mode"
+    echo "  1) Standard - 2 NICs (default)"
+    echo "  2) Fully Segregated - 4 NICs (automatic per-lab CIDRs)"
+    echo ""
+    read -p "Select network mode [default: 1]: " mode_choice
+
+    case "${mode_choice:-1}" in
+        1)
+            MICROCLOUD_NETWORK_MODE="standard-2nic"
+            BATCH_OVN_UNDERLAY_CIDRS=()
+            BATCH_CEPH_GENERAL_CIDRS=()
+            ;;
+        2)
+            MICROCLOUD_NETWORK_MODE="fully-segregated-4nic"
+            allocate_batch_microcloud_cidrs
+            print_section "Batch Four-NIC Network Plan"
+            printf '  %-28s %-20s %s\n' "Lab" "OVN underlay" "Ceph general"
+            printf '  %-28s %-20s %s\n' "----------------------------" "--------------------" "--------------------"
+            for index in "${!BATCH_WORKSPACE_NAMES[@]}"; do
+                printf '  %-28s %-20s %s\n' \
+                    "${BATCH_USER_PREFIXES[$index]}" \
+                    "${BATCH_OVN_UNDERLAY_CIDRS[$index]}" \
+                    "${BATCH_CEPH_GENERAL_CIDRS[$index]}"
+            done
+            ;;
+        *)
+            echo "Invalid selection. Choose 1 or 2."
+            exit 1
+            ;;
+    esac
+}
+
+assert_instance_sizing_matches() {
+    local instance_name="$1"
+    local expected_cpu="$2"
+    local expected_memory_mib="$3"
+    local actual_cpu_raw=""
+    local actual_memory_raw=""
+    local actual_cpu="0"
+    local actual_memory_mib="0"
+
+    if ! lxc info "$instance_name" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    actual_cpu_raw=$(lxc config get "$instance_name" limits.cpu --expanded 2>/dev/null || true)
+    actual_memory_raw=$(lxc config get "$instance_name" limits.memory --expanded 2>/dev/null || true)
+    actual_cpu=$(cpu_limit_to_count "$actual_cpu_raw")
+    actual_memory_mib=$(memory_limit_to_mib "$actual_memory_raw")
+
+    if (( actual_cpu != expected_cpu || actual_memory_mib != expected_memory_mib )); then
+        log_warn "Existing batch node ${instance_name} has ${actual_cpu} vCPU/${actual_memory_mib} MiB; expected ${expected_cpu} vCPU/${expected_memory_mib} MiB."
+        return 1
+    fi
+}
+
+validate_batch_existing_workspaces() {
+    local workspace_name=""
+    local lxd_prefix=""
+    local first_node=""
+    local current_count="0"
+    local current_cp_count="0"
+    local current_worker_count="0"
+    local current_network_mode=""
+    local eth2_network=""
+
+    for workspace_name in "${BATCH_WORKSPACE_NAMES[@]}"; do
+        workspace_exists "$workspace_name" || continue
+        lxd_prefix="${workspace_name//_/-}"
+
+        case "$scenario" in
+            microcloud)
+                current_count=$(list_lxd_instances_by_prefix "${lxd_prefix}-node-" | awk 'NF {count++} END {print count+0}')
+                if (( current_count > MICROCLOUD_NODE_COUNT )); then
+                    log_warn "Existing batch workspace ${workspace_name} has ${current_count} MicroCloud nodes; requested ${MICROCLOUD_NODE_COUNT}. Use the individual rebuild workflow to shrink it."
+                    return 1
+                fi
+
+                first_node="${lxd_prefix}-node-1"
+                if lxc info "$first_node" >/dev/null 2>&1; then
+                    assert_instance_sizing_matches \
+                        "$first_node" "$MICROCLOUD_NODE_CPU" "$MICROCLOUD_NODE_MEMORY_MB" \
+                        || return 1
+                    eth2_network=$(lxc config device get "$first_node" eth2 network 2>/dev/null || true)
+                    if [[ -n "$eth2_network" ]]; then
+                        current_network_mode="fully-segregated-4nic"
+                    else
+                        current_network_mode="standard-2nic"
+                    fi
+                    if [[ "$current_network_mode" != "$MICROCLOUD_NETWORK_MODE" ]]; then
+                        log_warn "Existing batch workspace ${workspace_name} uses ${current_network_mode}, but this batch requests ${MICROCLOUD_NETWORK_MODE}. Network mode changes require an individual rebuild."
+                        return 1
+                    fi
+                fi
+                ;;
+            k8s-snap)
+                current_cp_count=$(list_lxd_instances_by_prefix "${lxd_prefix}-cp-" | awk 'NF {count++} END {print count+0}')
+                current_worker_count=$(list_lxd_instances_by_prefix "${lxd_prefix}-worker-" | awk 'NF {count++} END {print count+0}')
+                if (( current_cp_count > k8s_control_plane_count || current_worker_count > k8s_worker_count )); then
+                    log_warn "Existing batch workspace ${workspace_name} is larger than the requested Kubernetes topology. Use the individual rebuild workflow to shrink it."
+                    return 1
+                fi
+                assert_instance_sizing_matches \
+                    "${lxd_prefix}-cp-1" "$K8S_CONTROL_PLANE_CPU" "$((K8S_CONTROL_PLANE_MEMORY_GIB * 1024))" \
+                    || return 1
+                if (( current_worker_count > 0 )); then
+                    assert_instance_sizing_matches \
+                        "${lxd_prefix}-worker-1" "$K8S_WORKER_CPU" "$((K8S_WORKER_MEMORY_GIB * 1024))" \
+                        || return 1
+                fi
+                ;;
+            k8s-juju)
+                current_cp_count=$(list_lxd_instances_by_prefix "${lxd_prefix}-cp-" | awk 'NF {count++} END {print count+0}')
+                current_worker_count=$(list_lxd_instances_by_prefix "${lxd_prefix}-worker-" | awk 'NF {count++} END {print count+0}')
+                if (( current_cp_count > k8s_juju_cp_count || current_worker_count > k8s_juju_worker_count )); then
+                    log_warn "Existing batch workspace ${workspace_name} is larger than the requested Juju Kubernetes topology. Use the individual rebuild workflow to shrink it."
+                    return 1
+                fi
+                assert_instance_sizing_matches "${lxd_prefix}-ctrl" 2 4096 || return 1
+                assert_instance_sizing_matches \
+                    "${lxd_prefix}-cp-1" "$K8S_JUJU_CP_CPU" "$((K8S_JUJU_CP_MEMORY_GIB * 1024))" \
+                    || return 1
+                if (( current_worker_count > 0 )); then
+                    assert_instance_sizing_matches \
+                        "${lxd_prefix}-worker-1" "$K8S_JUJU_WORKER_CPU" "$((K8S_JUJU_WORKER_MEMORY_GIB * 1024))" \
+                        || return 1
+                fi
+                ;;
+        esac
+    done
+}
+
+validate_batch_resource_names() {
+    local workspace_name=""
+    local lxd_prefix=""
+    local resource_name=""
+    local network_name=""
+    local owner=""
+    local -A planned_networks=()
+    local -a workspace_networks=()
+
+    for workspace_name in "${BATCH_WORKSPACE_NAMES[@]}"; do
+        lxd_prefix="${workspace_name//_/-}"
+
+        case "$scenario" in
+            microcloud) resource_name="${lxd_prefix}-node-${MICROCLOUD_NODE_COUNT}" ;;
+            k8s-snap) resource_name="${lxd_prefix}-cp-${k8s_control_plane_count}" ;;
+            k8s-juju) resource_name="${lxd_prefix}-worker-${k8s_juju_worker_count}" ;;
+        esac
+
+        if (( ${#resource_name} > 63 )); then
+            log_warn "Generated LXD resource name exceeds 63 characters: ${resource_name}"
+            return 1
+        fi
+
+        if ! workspace_exists "$workspace_name" \
+            && [[ -n "$(list_lxd_instances_by_prefix "${lxd_prefix}-" || true)" ]]; then
+            log_warn "LXD resources already use prefix ${lxd_prefix}, but workspace ${workspace_name} does not exist. Refusing unsafe adoption."
+            return 1
+        fi
+
+        [[ "$scenario" == "microcloud" ]] || continue
+
+        workspace_networks=("$(resolve_microcloud_uplink_network_name "$workspace_name")")
+        if [[ "$MICROCLOUD_NETWORK_MODE" == "fully-segregated-4nic" ]]; then
+            workspace_networks+=(
+                "$(resolve_microcloud_plane_network_name "$workspace_name" "ovn")"
+                "$(resolve_microcloud_plane_network_name "$workspace_name" "ceph")"
+            )
+        fi
+
+        for network_name in "${workspace_networks[@]}"; do
+            if [[ -n "${planned_networks[$network_name]:-}" \
+                && "${planned_networks[$network_name]}" != "$workspace_name" ]]; then
+                log_warn "Batch workspaces ${planned_networks[$network_name]} and ${workspace_name} resolve to the same LXD network name ${network_name}."
+                return 1
+            fi
+            planned_networks["$network_name"]="$workspace_name"
+
+            if lxc network show "$network_name" >/dev/null 2>&1; then
+                owner=$(lxc network get "$network_name" user.lab-automation.owner 2>/dev/null || true)
+                if [[ "$owner" != "$workspace_name" ]]; then
+                    log_warn "Existing LXD network ${network_name} is owned by ${owner:-unknown}, not ${workspace_name}."
+                    return 1
+                fi
+            fi
+        done
+    done
 }
 
 workspace_exists() {
@@ -2012,6 +2852,219 @@ ensure_tools() {
     TF_VAR_ssh_public_key=$(cat "${SSH_KEY_PATH}.pub")
 }
 
+deploy_lab() {
+    local user_prefix="$1"
+    local workspace_name="$2"
+    local inventory_file="$3"
+    local microcloud_ovn_underlay_cidr="${4:-$MICROCLOUD_OVN_UNDERLAY_CIDR}"
+    local microcloud_ceph_general_cidr="${5:-$MICROCLOUD_CEPH_GENERAL_CIDR}"
+    local microcloud_infra_only_tf="false"
+    local microcloud_uplink_network_name=""
+    local microcloud_ovn_underlay_network_name=""
+    local microcloud_ceph_network_name=""
+    local -a tofu_apply_args=()
+
+    log_info "Setting up OpenTofu workspace: ${workspace_name}..."
+    tofu workspace select "$workspace_name" 2>/dev/null || tofu workspace new "$workspace_name"
+
+    if [[ "$scenario" == "microcloud" ]]; then
+        reconcile_microcloud_orphans_with_state "$workspace_name"
+    fi
+
+    if [[ "$scenario" == "microcloud" && "$DEPLOYMENT_MODE" == "training" ]]; then
+        microcloud_infra_only_tf="true"
+    fi
+
+    if [[ "$scenario" == "microcloud" ]]; then
+        microcloud_uplink_network_name="$(resolve_microcloud_uplink_network_name "$workspace_name")"
+        microcloud_ovn_underlay_network_name="$(resolve_microcloud_plane_network_name "$workspace_name" "ovn")"
+        microcloud_ceph_network_name="$(resolve_microcloud_plane_network_name "$workspace_name" "ceph")"
+
+        ensure_owned_microcloud_network "$microcloud_uplink_network_name" "$workspace_name" "ovn-uplink"
+        if [[ "$MICROCLOUD_NETWORK_MODE" == "fully-segregated-4nic" ]]; then
+            ensure_owned_microcloud_network \
+                "$microcloud_ovn_underlay_network_name" "$workspace_name" \
+                "ovn-underlay" "$microcloud_ovn_underlay_cidr"
+            ensure_owned_microcloud_network \
+                "$microcloud_ceph_network_name" "$workspace_name" \
+                "ceph-general" "$microcloud_ceph_general_cidr"
+        fi
+    fi
+
+    log_info "Provisioning infrastructure with OpenTofu..."
+    tofu_apply_args=(
+        -auto-approve
+        -var="user_prefix=${user_prefix}"
+        -var="scenario=${scenario}"
+    )
+
+    if [[ "$scenario" == "k8s-snap" ]]; then
+        tofu_apply_args+=(
+            -var="k8s_control_plane_count=${k8s_control_plane_count}"
+            -var="k8s_worker_count=${k8s_worker_count}"
+            -var="k8s_control_plane_cpu=${K8S_CONTROL_PLANE_CPU}"
+            -var="k8s_control_plane_memory_gib=${K8S_CONTROL_PLANE_MEMORY_GIB}"
+            -var="k8s_worker_cpu=${K8S_WORKER_CPU}"
+            -var="k8s_worker_memory_gib=${K8S_WORKER_MEMORY_GIB}"
+        )
+        log_info "K8s topology: ${k8s_control_plane_count} control-plane node(s), ${k8s_worker_count} worker-only node(s)"
+        log_info "K8s sizing: cp=${K8S_CONTROL_PLANE_CPU}vCPU/${K8S_CONTROL_PLANE_MEMORY_GIB}GB, worker=${K8S_WORKER_CPU}vCPU/${K8S_WORKER_MEMORY_GIB}GB"
+    elif [[ "$scenario" == "microcloud" ]]; then
+        tofu_apply_args+=(
+            -var="microcloud_node_count=${MICROCLOUD_NODE_COUNT}"
+            -var="microcloud_node_cpu=${MICROCLOUD_NODE_CPU}"
+            -var="microcloud_node_memory_mb=${MICROCLOUD_NODE_MEMORY_MB}"
+            -var="microcloud_root_disk_size_gib=${MICROCLOUD_ROOT_DISK_GIB}"
+            -var="microcloud_ceph_disk_size_gib=${MICROCLOUD_CEPH_DISK_GIB}"
+            -var="microcloud_local_disk_size_gib=${MICROCLOUD_LOCAL_DISK_GIB}"
+            -var="microcloud_infra_only=${microcloud_infra_only_tf}"
+            -var="microcloud_uplink_network_name=${microcloud_uplink_network_name}"
+            -var="microcloud_network_mode=${MICROCLOUD_NETWORK_MODE}"
+            -var="microcloud_ovn_underlay_network_name=${microcloud_ovn_underlay_network_name}"
+            -var="microcloud_ceph_network_name=${microcloud_ceph_network_name}"
+            -var="microcloud_ovn_underlay_cidr=${microcloud_ovn_underlay_cidr}"
+            -var="microcloud_ceph_general_cidr=${microcloud_ceph_general_cidr}"
+            -parallelism=1
+        )
+        log_info "MicroCloud topology: ${MICROCLOUD_NODE_COUNT} node(s), deployment mode=${DEPLOYMENT_MODE}"
+        log_info "MicroCloud network mode: $(microcloud_network_mode_label)"
+        log_info "MicroCloud sizing: ${MICROCLOUD_NODE_CPU}vCPU/$((MICROCLOUD_NODE_MEMORY_MB / 1024))GB per node"
+    elif [[ "$scenario" == "k8s-juju" ]]; then
+        tofu_apply_args+=(
+            -var="k8s_juju_cp_count=${k8s_juju_cp_count}"
+            -var="k8s_juju_worker_count=${k8s_juju_worker_count}"
+            -var="k8s_juju_cp_cpu=${K8S_JUJU_CP_CPU}"
+            -var="k8s_juju_cp_memory_gib=${K8S_JUJU_CP_MEMORY_GIB}"
+            -var="k8s_juju_worker_cpu=${K8S_JUJU_WORKER_CPU}"
+            -var="k8s_juju_worker_memory_gib=${K8S_JUJU_WORKER_MEMORY_GIB}"
+        )
+        log_info "K8s Juju topology: 1 Juju controller, ${k8s_juju_cp_count} control-plane node(s), ${k8s_juju_worker_count} worker node(s)"
+        log_info "K8s Juju sizing: cp=${K8S_JUJU_CP_CPU}vCPU/${K8S_JUJU_CP_MEMORY_GIB}GB, worker=${K8S_JUJU_WORKER_CPU}vCPU/${K8S_JUJU_WORKER_MEMORY_GIB}GB"
+    fi
+
+    tofu apply "${tofu_apply_args[@]}"
+
+    if [[ "$scenario" == "microcloud" ]]; then
+        MICROCLOUD_OVN_UNDERLAY_CIDR="$microcloud_ovn_underlay_cidr"
+        MICROCLOUD_CEPH_GENERAL_CIDR="$microcloud_ceph_general_cidr"
+        verify_microcloud_network_planes "$workspace_name" "$MICROCLOUD_NODE_COUNT"
+    fi
+
+    if [[ "$scenario" == "k8s-snap" ]]; then
+        if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+            log_info "Skipping Canonical K8s installation and cluster bootstrap (training mode)..."
+            verify_training_environment "$workspace_name" "$scenario"
+            log_success "Canonical K8s Snap Training Lab Deployed Successfully!"
+            print_k8s_training_summary "$workspace_name" "$scenario"
+        else
+            log_info "Running Ansible Orchestration for K8s..."
+            ansible-playbook -i "$inventory_file" playbooks/k8s_snap.yml
+            log_success "K8s Lab Deployed Successfully!"
+            print_k8s_summary "$workspace_name"
+        fi
+        print_section "Access"
+        print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
+    elif [[ "$scenario" == "microcloud" ]]; then
+        if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+            log_info "Skipping MicroCloud package installation and cluster bootstrap (training mode)..."
+            verify_training_environment "$workspace_name" "$scenario"
+            log_success "MicroCloud Training Lab Deployed Successfully!"
+            print_microcloud_infra_summary "$workspace_name"
+        else
+            log_info "Running Ansible Orchestration for MicroCloud..."
+            ansible-playbook -i "$inventory_file" playbooks/microcloud.yml
+            log_success "MicroCloud Lab Deployed Successfully!"
+            print_microcloud_summary "$workspace_name"
+        fi
+        print_section "Access"
+        print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
+    elif [[ "$scenario" == "k8s-juju" ]]; then
+        if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
+            log_info "Skipping Juju and Canonical K8s installation/bootstrap (training mode)..."
+            verify_training_environment "$workspace_name" "$scenario"
+            log_success "Canonical K8s Juju Training Lab Deployed Successfully!"
+            print_k8s_training_summary "$workspace_name" "$scenario"
+        else
+            log_info "Running Ansible Orchestration for K8s (Juju)..."
+            ansible-playbook -i "$inventory_file" playbooks/k8s_juju.yml
+            log_success "K8s Juju Lab Deployed Successfully!"
+            print_k8s_juju_summary "$workspace_name"
+        fi
+        print_section "Access"
+        print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
+        if [[ "$DEPLOYMENT_MODE" == "full" ]]; then
+            print_kv "Kubeconfig" "lxc exec <prefix>-ctrl -- sudo -u ubuntu -H juju run k8s/leader get-kubeconfig -m lab-controller:k8s-lab"
+        fi
+    fi
+}
+
+run_batch_deployments() {
+    local index=""
+    local rc="0"
+    local status=""
+    local successful="0"
+    local failed="0"
+    local not_started="0"
+    local ovn_cidr=""
+    local ceph_cidr=""
+    local -a results=()
+
+    for index in "${!BATCH_WORKSPACE_NAMES[@]}"; do
+        print_section "Batch Lab $((index + 1)) of ${BATCH_LAB_COUNT}: ${BATCH_USER_PREFIXES[$index]}"
+        ovn_cidr="${BATCH_OVN_UNDERLAY_CIDRS[$index]:-}"
+        ceph_cidr="${BATCH_CEPH_GENERAL_CIDRS[$index]:-}"
+
+        set +e
+        (
+            set -e
+            deploy_lab \
+                "${BATCH_USER_PREFIXES[$index]}" \
+                "${BATCH_WORKSPACE_NAMES[$index]}" \
+                "${BATCH_INVENTORY_FILES[$index]}" \
+                "$ovn_cidr" \
+                "$ceph_cidr"
+        )
+        rc=$?
+        set -e
+
+        if (( rc == 0 )); then
+            results+=("SUCCESS")
+            successful=$((successful + 1))
+            continue
+        fi
+
+        results+=("FAILED")
+        failed=$((failed + 1))
+        for ((index = index + 1; index < BATCH_LAB_COUNT; index++)); do
+            results+=("NOT STARTED")
+            not_started=$((not_started + 1))
+        done
+        break
+    done
+
+    tofu workspace select default >/dev/null 2>&1 || true
+
+    print_section "Batch Deployment Summary"
+    printf '  %-28s %s\n' "Lab" "Result"
+    printf '  %-28s %s\n' "----------------------------" "-----------"
+    for index in "${!BATCH_WORKSPACE_NAMES[@]}"; do
+        status="${results[$index]:-NOT STARTED}"
+        printf '  %-28s %s\n' "${BATCH_USER_PREFIXES[$index]}" "$status"
+    done
+    echo ""
+    print_kv "Requested labs" "$BATCH_LAB_COUNT"
+    print_kv "Successful" "$successful"
+    print_kv "Failed" "$failed"
+    print_kv "Not started" "$not_started"
+
+    if (( failed > 0 )); then
+        log_warn "Batch deployment stopped at the first failure. Rerun the same batch to reconcile existing workspaces and continue."
+        return 1
+    fi
+
+    log_success "All ${BATCH_LAB_COUNT} labs deployed successfully."
+}
+
 destroy_menu() {
     # Get active workspaces (ignoring default)
     mapfile -t envs < <(
@@ -2232,20 +3285,83 @@ workspace_name=""
 workspace_suffix="$(get_workspace_suffix "$scenario" "$DEPLOYMENT_MODE")"
 inventory_file=""
 existing_workspace=false
+BATCH_USER_PREFIXES=()
+BATCH_WORKSPACE_NAMES=()
+BATCH_INVENTORY_FILES=()
+BATCH_OVN_UNDERLAY_CIDRS=()
+BATCH_CEPH_GENERAL_CIDRS=()
 
 if [[ "$lab_intent" == "new" ]]; then
+    print_section "Deployment Scope"
+    echo "  1) Single lab (default)"
+    echo "  2) Multiple identical labs (sequential batch)"
     echo ""
-    read -p "Enter a name for your new lab (e.g., your name): " user_prefix_input
+    read -p "Select deployment scope [default: 1]: " deployment_scope_choice
+
+    case "${deployment_scope_choice:-1}" in
+        1)
+            DEPLOYMENT_SCOPE="single"
+            BATCH_LAB_COUNT=1
+            ;;
+        2)
+            DEPLOYMENT_SCOPE="batch"
+            echo ""
+            read -p "Number of labs [allowed: 2-${BATCH_MAX_LABS}]: " batch_lab_count_input
+            BATCH_LAB_COUNT="$batch_lab_count_input"
+            if ! BATCH_LAB_COUNT=$(normalize_decimal "$BATCH_LAB_COUNT"); then
+                echo "Invalid lab count. Enter a value from 2 to ${BATCH_MAX_LABS}."
+                exit 1
+            fi
+            if (( BATCH_LAB_COUNT < 2 || BATCH_LAB_COUNT > BATCH_MAX_LABS )); then
+                echo "Invalid lab count. Enter a value from 2 to ${BATCH_MAX_LABS}."
+                exit 1
+            fi
+
+            ;;
+        *)
+            echo "Invalid selection. Choose 1 or 2."
+            exit 1
+            ;;
+    esac
+
+    echo ""
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        read -p "Enter a base name for the labs (example: student): " user_prefix_input
+    else
+        read -p "Enter a name for your new lab (e.g., your name): " user_prefix_input
+    fi
     user_prefix=$(echo "$user_prefix_input" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
     if [[ -z "$user_prefix" ]]; then
         echo "Invalid lab name. Use letters and/or numbers."
         exit 1
     fi
-    workspace_name="${user_prefix}_${workspace_suffix}"
-    inventory_file="inventory_${workspace_name}.yaml"
-    if workspace_exists "$workspace_name"; then
-        echo "A lab named '${user_prefix}' already exists. Choose 'Manage an existing lab' to work with it."
-        exit 1
+
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        while read -r batch_prefix batch_workspace batch_inventory; do
+            BATCH_USER_PREFIXES+=("$batch_prefix")
+            BATCH_WORKSPACE_NAMES+=("$batch_workspace")
+            BATCH_INVENTORY_FILES+=("$batch_inventory")
+        done < <(generate_batch_lab_names "$user_prefix" "$BATCH_LAB_COUNT" "$workspace_suffix")
+
+        user_prefix="${BATCH_USER_PREFIXES[0]}"
+        workspace_name="${BATCH_WORKSPACE_NAMES[0]}"
+        inventory_file="${BATCH_INVENTORY_FILES[0]}"
+
+        print_section "Batch Lab Names"
+        for i in "${!BATCH_WORKSPACE_NAMES[@]}"; do
+            if workspace_exists "${BATCH_WORKSPACE_NAMES[$i]}"; then
+                printf '  %-28s %s\n' "${BATCH_USER_PREFIXES[$i]}" "existing workspace (will reconcile)"
+            else
+                printf '  %-28s %s\n' "${BATCH_USER_PREFIXES[$i]}" "new"
+            fi
+        done
+    else
+        workspace_name="${user_prefix}_${workspace_suffix}"
+        inventory_file="inventory_${workspace_name}.yaml"
+        if workspace_exists "$workspace_name"; then
+            echo "A lab named '${user_prefix}' already exists. Choose 'Manage an existing lab' to work with it."
+            exit 1
+        fi
     fi
 else
     # Manage: show numbered list and let user pick
@@ -2477,7 +3593,11 @@ if [[ "$scenario" == "microcloud" ]]; then
         exit 1
     fi
 
-    configure_microcloud_network_mode "$workspace_name"
+    if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+        configure_microcloud_batch_network_mode
+    else
+        configure_microcloud_network_mode "$workspace_name"
+    fi
     configure_microcloud_sizing "$MICROCLOUD_NODE_COUNT"
 fi
 
@@ -2549,141 +3669,19 @@ if [[ "$scenario" == "k8s-juju" ]]; then
     fi
 fi
 
-log_info "Setting up OpenTofu workspace: ${workspace_name}..."
-tofu workspace select "$workspace_name" 2>/dev/null || tofu workspace new "$workspace_name"
-
-if [[ "$scenario" == "microcloud" ]]; then
-    reconcile_microcloud_orphans_with_state "$workspace_name"
-fi
-
-MICROCLOUD_INFRA_ONLY_TF="false"
-if [[ "$scenario" == "microcloud" && "$DEPLOYMENT_MODE" == "training" ]]; then
-    MICROCLOUD_INFRA_ONLY_TF="true"
-fi
-
-MICROCLOUD_UPLINK_NETWORK_NAME=""
-if [[ "$scenario" == "microcloud" ]]; then
-    MICROCLOUD_UPLINK_NETWORK_NAME="$(resolve_microcloud_uplink_network_name "$workspace_name")"
-    MICROCLOUD_OVN_UNDERLAY_NETWORK_NAME="$(resolve_microcloud_plane_network_name "$workspace_name" "ovn")"
-    MICROCLOUD_CEPH_NETWORK_NAME="$(resolve_microcloud_plane_network_name "$workspace_name" "ceph")"
-
-    ensure_owned_microcloud_network "$MICROCLOUD_UPLINK_NETWORK_NAME" "$workspace_name" "ovn-uplink"
-    if [[ "$MICROCLOUD_NETWORK_MODE" == "fully-segregated-4nic" ]]; then
-        ensure_owned_microcloud_network \
-            "$MICROCLOUD_OVN_UNDERLAY_NETWORK_NAME" "$workspace_name" \
-            "ovn-underlay" "$MICROCLOUD_OVN_UNDERLAY_CIDR"
-        ensure_owned_microcloud_network \
-            "$MICROCLOUD_CEPH_NETWORK_NAME" "$workspace_name" \
-            "ceph-general" "$MICROCLOUD_CEPH_GENERAL_CIDR"
-    fi
-fi
-
-log_info "Provisioning infrastructure with OpenTofu..."
-tofu_apply_args=(
-    -auto-approve
-    -var="user_prefix=${user_prefix}"
-    -var="scenario=${scenario}"
-)
-
-if [[ "$scenario" == "k8s-snap" ]]; then
-    tofu_apply_args+=(
-        -var="k8s_control_plane_count=${k8s_control_plane_count}"
-        -var="k8s_worker_count=${k8s_worker_count}"
-        -var="k8s_control_plane_cpu=${K8S_CONTROL_PLANE_CPU}"
-        -var="k8s_control_plane_memory_gib=${K8S_CONTROL_PLANE_MEMORY_GIB}"
-        -var="k8s_worker_cpu=${K8S_WORKER_CPU}"
-        -var="k8s_worker_memory_gib=${K8S_WORKER_MEMORY_GIB}"
-    )
-    log_info "K8s topology: ${k8s_control_plane_count} control-plane node(s), ${k8s_worker_count} worker-only node(s)"
-    log_info "K8s sizing: cp=${K8S_CONTROL_PLANE_CPU}vCPU/${K8S_CONTROL_PLANE_MEMORY_GIB}GB, worker=${K8S_WORKER_CPU}vCPU/${K8S_WORKER_MEMORY_GIB}GB"
-elif [[ "$scenario" == "microcloud" ]]; then
-    # Work around intermittent terraform-lxd provider state race during
-    # concurrent volume creation by applying MicroCloud resources serially.
-    tofu_apply_args+=(
-        -var="microcloud_node_count=${MICROCLOUD_NODE_COUNT}"
-        -var="microcloud_node_cpu=${MICROCLOUD_NODE_CPU}"
-        -var="microcloud_node_memory_mb=${MICROCLOUD_NODE_MEMORY_MB}"
-        -var="microcloud_root_disk_size_gib=${MICROCLOUD_ROOT_DISK_GIB}"
-        -var="microcloud_ceph_disk_size_gib=${MICROCLOUD_CEPH_DISK_GIB}"
-        -var="microcloud_local_disk_size_gib=${MICROCLOUD_LOCAL_DISK_GIB}"
-        -var="microcloud_infra_only=${MICROCLOUD_INFRA_ONLY_TF}"
-        -var="microcloud_uplink_network_name=${MICROCLOUD_UPLINK_NETWORK_NAME}"
-        -var="microcloud_network_mode=${MICROCLOUD_NETWORK_MODE}"
-        -var="microcloud_ovn_underlay_network_name=${MICROCLOUD_OVN_UNDERLAY_NETWORK_NAME}"
-        -var="microcloud_ceph_network_name=${MICROCLOUD_CEPH_NETWORK_NAME}"
-        -var="microcloud_ovn_underlay_cidr=${MICROCLOUD_OVN_UNDERLAY_CIDR}"
-        -var="microcloud_ceph_general_cidr=${MICROCLOUD_CEPH_GENERAL_CIDR}"
-        -parallelism=1
-    )
-    log_info "MicroCloud topology: ${MICROCLOUD_NODE_COUNT} node(s), deployment mode=${DEPLOYMENT_MODE}"
-    log_info "MicroCloud network mode: $(microcloud_network_mode_label)"
-    log_info "MicroCloud sizing: ${MICROCLOUD_NODE_CPU}vCPU/$((MICROCLOUD_NODE_MEMORY_MB / 1024))GB per node"
-elif [[ "$scenario" == "k8s-juju" ]]; then
-    tofu_apply_args+=(
-        -var="k8s_juju_cp_count=${k8s_juju_cp_count}"
-        -var="k8s_juju_worker_count=${k8s_juju_worker_count}"
-        -var="k8s_juju_cp_cpu=${K8S_JUJU_CP_CPU}"
-        -var="k8s_juju_cp_memory_gib=${K8S_JUJU_CP_MEMORY_GIB}"
-        -var="k8s_juju_worker_cpu=${K8S_JUJU_WORKER_CPU}"
-        -var="k8s_juju_worker_memory_gib=${K8S_JUJU_WORKER_MEMORY_GIB}"
-    )
-    log_info "K8s Juju topology: 1 Juju controller, ${k8s_juju_cp_count} control-plane node(s), ${k8s_juju_worker_count} worker node(s)"
-    log_info "K8s Juju sizing: cp=${K8S_JUJU_CP_CPU}vCPU/${K8S_JUJU_CP_MEMORY_GIB}GB, worker=${K8S_JUJU_WORKER_CPU}vCPU/${K8S_JUJU_WORKER_MEMORY_GIB}GB"
-fi
-
-tofu apply "${tofu_apply_args[@]}"
-
-if [[ "$scenario" == "microcloud" ]]; then
-    verify_microcloud_network_planes "$workspace_name" "$MICROCLOUD_NODE_COUNT"
-fi
-
-if [[ "$scenario" == "k8s-snap" ]]; then
-    if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
-        log_info "Skipping Canonical K8s installation and cluster bootstrap (training mode)..."
-        verify_training_environment "$workspace_name" "$scenario"
-        log_success "Canonical K8s Snap Training Lab Deployed Successfully!"
-        print_k8s_training_summary "$workspace_name" "$scenario"
-    else
-        log_info "Running Ansible Orchestration for K8s..."
-        ansible-playbook -i "$inventory_file" playbooks/k8s_snap.yml
-        log_success "K8s Lab Deployed Successfully!"
-        print_k8s_summary "$workspace_name"
-    fi
-    print_section "Access"
-    print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
-elif [[ "$scenario" == "microcloud" ]]; then
-    if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
-        log_info "Skipping MicroCloud package installation and cluster bootstrap (training mode)..."
-        verify_training_environment "$workspace_name" "$scenario"
-        log_success "MicroCloud Training Lab Deployed Successfully!"
-        print_microcloud_infra_summary "$workspace_name"
-    else
-        log_info "Running Ansible Orchestration for MicroCloud..."
-        ansible-playbook -i "$inventory_file" playbooks/microcloud.yml
-        log_success "MicroCloud Lab Deployed Successfully!"
-        print_microcloud_summary "$workspace_name"
-    fi
-    print_section "Access"
-    print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
-fi
-
-if [[ "$scenario" == "k8s-juju" ]]; then
-    if [[ "$DEPLOYMENT_MODE" == "training" ]]; then
-        log_info "Skipping Juju and Canonical K8s installation/bootstrap (training mode)..."
-        verify_training_environment "$workspace_name" "$scenario"
-        log_success "Canonical K8s Juju Training Lab Deployed Successfully!"
-        print_k8s_training_summary "$workspace_name" "$scenario"
-    else
-        log_info "Running Ansible Orchestration for K8s (Juju)..."
-        ansible-playbook -i "$inventory_file" playbooks/k8s_juju.yml
-        log_success "K8s Juju Lab Deployed Successfully!"
-        print_k8s_juju_summary "$workspace_name"
-    fi
-    print_section "Access"
-    print_kv "SSH" "ssh -i $SSH_KEY_PATH ubuntu@<VM_IP>"
-    if [[ "$DEPLOYMENT_MODE" == "full" ]]; then
-        print_kv "Kubeconfig" "lxc exec <prefix>-ctrl -- sudo -u ubuntu -H juju run k8s/leader get-kubeconfig -m lab-controller:k8s-lab"
-    fi
+if [[ "$DEPLOYMENT_SCOPE" == "batch" ]]; then
+    validate_batch_resource_names
+    validate_batch_existing_workspaces
+    print_batch_capacity_plan
+    confirm_batch_plan
+    run_batch_deployments
+else
+    deploy_lab \
+        "$user_prefix" \
+        "$workspace_name" \
+        "$inventory_file" \
+        "$MICROCLOUD_OVN_UNDERLAY_CIDR" \
+        "$MICROCLOUD_CEPH_GENERAL_CIDR"
 fi
 
 }
