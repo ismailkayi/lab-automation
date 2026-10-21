@@ -112,7 +112,15 @@ EOF
         return
     fi
     if [[ "$1 $2" == "network get" ]]; then
-        echo "$mock_owner"
+        if [[ "${4:-}" == "user.lab-automation.cidr" ]]; then
+            echo "${mock_cidr:-}"
+        else
+            echo "$mock_owner"
+        fi
+        return 0
+    fi
+    if [[ "$1 $2" == "network create" ]]; then
+        created_network_args="$*"
         return 0
     fi
     if [[ "$1 $2" == "network delete" ]]; then
@@ -136,6 +144,50 @@ assert_equal "" "$deleted_network" "unowned network cleanup"
 mock_owner="demo_workspace"
 delete_owned_microcloud_network "mc-demo-test-up" "demo_workspace" >/dev/null
 assert_equal "mc-demo-test-up" "$deleted_network" "owned network cleanup"
+
+assert_equal "172.30.44.1/24" "$(microcloud_uplink_gateway "172.30.44.0/24")" "uplink gateway"
+assert_equal "172.30.44.100-172.30.44.200" "$(microcloud_uplink_ovn_range "172.30.44.0/24")" "uplink OVN range"
+assert_equal "172.30.44.224/27" "$(microcloud_uplink_forward_routes "172.30.44.0/24")" "uplink forward routes"
+
+mock_network_exists=false
+first_uplink="$(resolve_microcloud_uplink_cidr "student01_microcloud")"
+[[ "$first_uplink" =~ ^172\.30\.[0-9]+\.0/24$ ]] || fail "new labs must get a /24 from the uplink pool, got '${first_uplink}'"
+assert_equal "$first_uplink" "$(resolve_microcloud_uplink_cidr "student01_microcloud")" "deterministic uplink allocation"
+second_uplink="$(resolve_microcloud_uplink_cidr "student01_microcloud" "$first_uplink")"
+[[ "$second_uplink" =~ ^172\.30\.[0-9]+\.0/24$ && "$second_uplink" != "$first_uplink" ]] \
+    || fail "a reserved uplink subnet must be skipped"
+list_host_ipv4_subnets() {
+    printf '%s\n' "10.20.0.0/16" "192.168.50.0/24" "$first_uplink"
+}
+[[ "$(resolve_microcloud_uplink_cidr "student01_microcloud")" != "$first_uplink" ]] \
+    || fail "an uplink subnet used by another lab must be skipped"
+list_host_ipv4_subnets() {
+    printf '%s\n' "10.20.0.0/16" "192.168.50.0/24"
+}
+
+mock_network_exists=true
+mock_owner="student01_microcloud"
+mock_cidr="172.30.9.0/24"
+assert_equal "172.30.9.0/24" "$(resolve_microcloud_uplink_cidr "student01_microcloud")" "existing uplink subnet reuse"
+mock_cidr=""
+assert_equal "" "$(resolve_microcloud_uplink_cidr "student01_microcloud")" "legacy IP-free uplink stays without a subnet"
+
+mock_network_exists=false
+created_network_args=""
+ensure_owned_microcloud_network "mc-stud-ab12-up" "student01_microcloud" "ovn-uplink" "172.30.9.0/24" >/dev/null
+for expected_arg in "ipv4.address=172.30.9.1/24" "ipv4.nat=true" "ipv4.dhcp=false" "ipv6.address=none" "user.lab-automation.cidr=172.30.9.0/24"; do
+    [[ " $created_network_args " == *" $expected_arg "* ]] || fail "uplink bridge must be created with ${expected_arg}"
+done
+created_network_args=""
+ensure_owned_microcloud_network "mc-stud-ab12-up" "student01_microcloud" "ovn-uplink" "" >/dev/null
+[[ " $created_network_args " == *" ipv4.address=none "* && " $created_network_args " != *"ipv4.nat"* ]] \
+    || fail "an uplink without a subnet must stay IP-free"
+created_network_args=""
+ensure_owned_microcloud_network "mc-stud-ab12-ov" "student01_microcloud" "ovn-underlay" "172.28.9.0/24" >/dev/null
+[[ " $created_network_args " == *" ipv4.address=none "* && " $created_network_args " != *"ipv4.nat"* ]] \
+    || fail "dedicated underlay planes must stay IP-free"
+mock_owner="demo_workspace"
+mock_cidr=""
 
 BATCH_WORKSPACE_NAMES=(batch01_microcloud batch02_microcloud batch03_microcloud)
 MICROCLOUD_NODE_COUNT=3

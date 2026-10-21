@@ -324,7 +324,7 @@ Each lab receives its own:
 - OpenTofu workspace;
 - Ansible inventory;
 - LXD resource names;
-- MicroCloud uplink network;
+- MicroCloud uplink network and uplink subnet (see [OVN uplink and external access](#ovn-uplink-and-external-access));
 - OVN underlay and Ceph CIDRs in four-NIC mode.
 
 ### Batch capacity admission
@@ -486,13 +486,61 @@ Before provisioning, it checks the selected CIDRs against:
 - LXD managed subnets;
 - CIDRs recorded for other managed labs;
 - the other selected network plane;
-- the planned OVN external subnet.
+- the OVN uplink pool (`172.30.0.0/16`).
 
 Provisioning stops if a collision is found. Static addresses are matched to
 stable MAC addresses and persist across reboots.
 
 Use this layout when you want to study or validate dedicated OVN and Ceph
 network planes.
+
+### OVN uplink and external access
+
+In both layouts, the OVN uplink NIC inside each node stays IP-free, as
+MicroCloud requires. On a physical deployment, the uplink network also has a
+router that owns the gateway address. In the lab, the host-side LXD bridge for
+the uplink plays that router role:
+
+- every lab receives its own `/24` from `172.30.0.0/16`;
+- the uplink bridge owns the first address (for example `172.30.44.1/24`) and
+  NATs traffic to the host's network;
+- OVN uses `.100`–`.200` of the same subnet for its routers;
+- `.224/27` is reserved for network forwards and load balancers (UPLINK
+  `ipv4.routes`).
+
+As a result, instances on OVN networks can reach the internet (packages,
+cloud-init, snaps), and network forward addresses can be reached from the
+host.
+
+The subnet is chosen automatically, checked against host routes, LXD networks,
+and other labs, and recorded on the uplink bridge so that reruns reuse it.
+
+- **Full deployments** configure MicroCloud with these values automatically,
+  including the forward and load balancer range.
+- **Training deployments** print them in the final summary, and the batch
+  summary lists them per lab. Participants enter them during
+  `microcloud init`:
+
+```text
+OVN uplink values to enter during 'microcloud init':
+  IPv4 gateway (CIDR)          172.30.44.1/24
+  First IPv4 address           172.30.44.100
+  Last IPv4 address            172.30.44.200
+  DNS server                   8.8.8.8
+
+For network forwards and load balancers, after 'microcloud init' run:
+  lxc network set UPLINK ipv4.routes=172.30.44.224/27
+```
+
+> [!NOTE]
+> The host routes between lab uplink subnets, so OVN instances in one lab can
+> reach another lab's uplink subnet. Labs created before this change keep their
+> IP-free uplink bridge and have no external access from OVN networks; rebuild
+> them to get a gateway.
+
+If OVN instances still cannot reach the internet, check that the host firewall
+allows forwarding for LXD bridges. Docker sets the `FORWARD` chain policy to
+`DROP`; see the LXD documentation on configuring the firewall.
 
 ### MicroCloud validation
 
@@ -740,6 +788,8 @@ the kubeconfig from the leader unit.
 - Kubernetes update paths are designed to reconcile or expand existing labs.
 - In-place topology shrink is intentionally blocked.
 - MicroCloud network cleanup is ownership-aware.
+- Each MicroCloud lab's uplink bridge is the gateway of its own `/24` and NATs
+  OVN traffic; node-side uplink NICs remain IP-free.
 - Workspace deletion is verified before a destroy operation is reported as
   successful.
 
@@ -785,7 +835,8 @@ smaller topology.
 ### A MicroCloud subnet collision is reported
 
 The selected four-NIC subnet overlaps a host route, LXD network, another
-managed lab, or the other network plane. Run the deployment again and enter an
+managed lab, the other network plane, or the OVN uplink pool
+(`172.30.0.0/16`). Run the deployment again and enter an
 unused IPv4 CIDR when prompted.
 
 Do not bypass the check unless the networks are intentionally isolated and you
