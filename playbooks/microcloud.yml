@@ -164,9 +164,14 @@
       set_fact:
         lookup_subnet: "{{ ansible_facts['default_ipv4']['address'].split('.')[:-1] | join('.') + '.0/24' }}"
 
-    - name: Select non-overlapping OVN subnet base
+    - name: Select OVN uplink subnet base
+      # Labs created by orchestrate.sh get a per-lab uplink /24 whose host-side
+      # bridge owns the .1 gateway. Older labs without one keep the fixed subnet.
       set_fact:
-        ovn_subnet_base: "{{ '192.168.250' if lookup_subnet.startswith('10.') else '10.250.1' }}"
+        ovn_subnet_base: >-
+          {{ ((microcloud_uplink_cidr | default('')).split('/')[0].split('.')[:3] | join('.'))
+             if (microcloud_uplink_cidr | default('') | length > 0)
+             else ('192.168.250' if lookup_subnet.startswith('10.') else '10.250.1') }}
 
     - name: Read preferred UPLINK network name state in LXD
       command: lxc network show UPLINK
@@ -295,6 +300,14 @@
         - uplink_finalize.rc != 0
         - "'already exists' not in (uplink_finalize.stderr | default(''))"
       when: not ovn_uplink_created
+
+    - name: Allow per-lab addresses for network forwards and load balancers on the OVN UPLINK
+      # .224/27 sits outside the .100-.200 range used by OVN routers.
+      command: >
+        lxc network set {{ microcloud_uplink_network_name }}
+        ipv4.routes={{ ovn_subnet_base }}.224/27
+      changed_when: true
+      when: (microcloud_uplink_cidr | default('') | length) > 0
 
     - name: Read OVN default network state in LXD
       command: lxc network show {{ microcloud_ovn_network_name }}

@@ -28,6 +28,12 @@ MICROCLOUD_MAX_NODES="10"
 MICROCLOUD_NETWORK_MODE="standard-2nic"
 MICROCLOUD_OVN_UNDERLAY_CIDR=""
 MICROCLOUD_CEPH_GENERAL_CIDR=""
+# Each lab gets its own /24 from this pool for the OVN uplink. The host-side
+# bridge owns the .1 gateway and NATs traffic, acting as the upstream router.
+MICROCLOUD_UPLINK_POOL_PREFIX="172.30"
+MICROCLOUD_UPLINK_POOL_CIDR="172.30.0.0/16"
+MICROCLOUD_UPLINK_DNS="8.8.8.8"
+MICROCLOUD_UPLINK_CIDR=""
 MICROCLOUD_OVN_UNDERLAY_NETWORK_NAME=""
 MICROCLOUD_CEPH_NETWORK_NAME=""
 DEPLOYMENT_MODE="full"
@@ -1026,7 +1032,6 @@ configure_microcloud_network_mode() {
     local subnet_slot="0"
     local default_ovn_cidr=""
     local default_ceph_cidr=""
-    local ovn_external_cidr=""
     local ovn_cidr_input=""
     local ceph_cidr_input=""
 
@@ -1050,11 +1055,6 @@ configure_microcloud_network_mode() {
             subnet_slot=$((16#${workspace_hash:0:2} % 240 + 10))
             default_ovn_cidr="172.28.${subnet_slot}.0/24"
             default_ceph_cidr="172.29.${subnet_slot}.0/24"
-            if [[ "$(lxc network get "$LXD_NETWORK_NAME" ipv4.address 2>/dev/null || true)" == 10.* ]]; then
-                ovn_external_cidr="192.168.250.0/24"
-            else
-                ovn_external_cidr="10.250.1.0/24"
-            fi
 
             echo ""
             read -p "OVN underlay IPv4 CIDR [default: ${default_ovn_cidr}]: " ovn_cidr_input
@@ -1074,18 +1074,15 @@ configure_microcloud_network_mode() {
                 log_warn "OVN underlay and Ceph general subnets must not overlap."
                 exit 1
             fi
-            if subnets_overlap "$MICROCLOUD_OVN_UNDERLAY_CIDR" "$ovn_external_cidr" \
-                || subnets_overlap "$MICROCLOUD_CEPH_GENERAL_CIDR" "$ovn_external_cidr"; then
-                log_warn "Dedicated plane subnets must not overlap the planned OVN external subnet ${ovn_external_cidr}."
+            if subnets_overlap "$MICROCLOUD_OVN_UNDERLAY_CIDR" "$MICROCLOUD_UPLINK_POOL_CIDR" \
+                || subnets_overlap "$MICROCLOUD_CEPH_GENERAL_CIDR" "$MICROCLOUD_UPLINK_POOL_CIDR"; then
+                log_warn "Dedicated plane subnets must not overlap the OVN uplink pool ${MICROCLOUD_UPLINK_POOL_CIDR}."
                 exit 1
             fi
             if ! assert_microcloud_subnet_available "$MICROCLOUD_OVN_UNDERLAY_CIDR" "OVN underlay"; then
                 exit 1
             fi
             if ! assert_microcloud_subnet_available "$MICROCLOUD_CEPH_GENERAL_CIDR" "Ceph general"; then
-                exit 1
-            fi
-            if ! assert_microcloud_subnet_available "$ovn_external_cidr" "OVN external"; then
                 exit 1
             fi
             ;;
@@ -1100,13 +1097,14 @@ configure_microcloud_network_mode() {
         print_kv "Mode" "Fully Segregated - 4 NICs"
         print_kv "mgmt0" "SSH, MicroCloud, and LXD management"
         print_kv "ovn-uplink" "IP-free external OVN uplink"
-        print_kv "OVN external subnet" "$ovn_external_cidr"
+        print_kv "OVN uplink subnet" "Per-lab /24 from ${MICROCLOUD_UPLINK_POOL_CIDR}, gateway on the host"
         print_kv "ovn-underlay" "${MICROCLOUD_OVN_UNDERLAY_CIDR} (OVN Geneve)"
         print_kv "ceph-general" "${MICROCLOUD_CEPH_GENERAL_CIDR} (Ceph public + cluster)"
     else
         print_kv "Mode" "Standard - 2 NICs"
         print_kv "eth0" "Management, SSH, and cluster traffic"
         print_kv "eth1" "IP-free external OVN uplink"
+        print_kv "OVN uplink subnet" "Per-lab /24 from ${MICROCLOUD_UPLINK_POOL_CIDR}, gateway on the host"
     fi
 }
 
@@ -1558,20 +1556,8 @@ allocate_batch_microcloud_cidrs() {
     local ovn_network_name=""
     local ceph_network_name=""
     local existing_owner=""
-    local external_cidr=""
     local allocated=false
     local -a reserved_cidrs=()
-
-    if [[ "$(lxc network get "$LXD_NETWORK_NAME" ipv4.address 2>/dev/null || true)" == 10.* ]]; then
-        external_cidr="192.168.250.0/24"
-    else
-        external_cidr="10.250.1.0/24"
-    fi
-
-    if cidr_overlaps_inventory "$external_cidr"; then
-        log_warn "Planned OVN external subnet ${external_cidr} overlaps a host or LXD subnet."
-        return 1
-    fi
 
     BATCH_OVN_UNDERLAY_CIDRS=()
     BATCH_CEPH_GENERAL_CIDRS=()
@@ -1609,7 +1595,7 @@ allocate_batch_microcloud_cidrs() {
             if cidr_overlaps_inventory "$ceph_cidr" "${reserved_cidrs[@]}"; then
                 continue
             fi
-            if subnets_overlap "$ovn_cidr" "$external_cidr" || subnets_overlap "$ceph_cidr" "$external_cidr"; then
+            if subnets_overlap "$ovn_cidr" "$MICROCLOUD_UPLINK_POOL_CIDR" || subnets_overlap "$ceph_cidr" "$MICROCLOUD_UPLINK_POOL_CIDR"; then
                 continue
             fi
 
@@ -2244,6 +2230,67 @@ resolve_microcloud_plane_network_name() {
     echo "mc-${lxd_prefix:0:4}-${network_hash:0:4}-${plane_suffix}"
 }
 
+microcloud_uplink_gateway() {
+    local cidr="$1"
+
+    echo "$(cidr_host_address "$cidr" 1)/${cidr#*/}"
+}
+
+microcloud_uplink_ovn_range() {
+    local cidr="$1"
+
+    echo "$(cidr_host_address "$cidr" 100)-$(cidr_host_address "$cidr" 200)"
+}
+
+# Addresses that network forwards and load balancers may use (UPLINK ipv4.routes).
+microcloud_uplink_forward_routes() {
+    local cidr="$1"
+
+    echo "$(cidr_host_address "$cidr" 224)/27"
+}
+
+get_microcloud_uplink_cidr() {
+    local ws_name="$1"
+
+    lxc network get "$(resolve_microcloud_uplink_network_name "$ws_name")" user.lab-automation.cidr 2>/dev/null || true
+}
+
+resolve_microcloud_uplink_cidr() {
+    local ws_name="$1"
+    shift
+    local network_name=""
+    local owner=""
+    local workspace_hash=""
+    local start_slot="0"
+    local offset="0"
+    local candidate=""
+
+    network_name="$(resolve_microcloud_uplink_network_name "$ws_name")"
+    if lxc network show "$network_name" >/dev/null 2>&1; then
+        owner=$(lxc network get "$network_name" user.lab-automation.owner 2>/dev/null || true)
+        if [[ "$owner" == "$ws_name" ]]; then
+            # Reuse the recorded subnet. Labs created before per-lab uplink
+            # subnets have none and keep their IP-free uplink bridge.
+            lxc network get "$network_name" user.lab-automation.cidr 2>/dev/null || true
+            return 0
+        fi
+    fi
+
+    workspace_hash=$(printf '%s' "$ws_name" | md5sum | awk '{print $1}')
+    start_slot=$((16#${workspace_hash:0:2}))
+    for ((offset = 0; offset < 256; offset++)); do
+        candidate="${MICROCLOUD_UPLINK_POOL_PREFIX}.$(( (start_slot + offset) % 256 )).0/24"
+        if cidr_overlaps_inventory "$candidate" "$@"; then
+            continue
+        fi
+        echo "$candidate"
+        return 0
+    done
+
+    log_warn "No free /24 left in the OVN uplink pool ${MICROCLOUD_UPLINK_POOL_CIDR}." >&2
+    return 1
+}
+
 ensure_owned_microcloud_network() {
     local network_name="$1"
     local env_name="$2"
@@ -2255,7 +2302,12 @@ ensure_owned_microcloud_network() {
     local ipv4_address=""
     local ipv6_address=""
     local existing_cidr=""
+    local expected_ipv4="none"
     local -a create_args=()
+
+    if [[ "$network_role" == "ovn-uplink" && -n "$network_cidr" ]]; then
+        expected_ipv4="$(microcloud_uplink_gateway "$network_cidr")"
+    fi
 
     if lxc network show "$network_name" >/dev/null 2>&1; then
         owner=$(lxc network get "$network_name" user.lab-automation.owner 2>/dev/null || true)
@@ -2270,8 +2322,12 @@ ensure_owned_microcloud_network() {
             log_warn "Expected owner=${env_name}, role=${network_role}; found owner=${owner:-unset}, role=${existing_role:-unset}."
             exit 1
         fi
-        if [[ "$network_type" != "bridge" || "$ipv4_address" != "none" || "$ipv6_address" != "none" ]]; then
-            log_warn "Owned network ${network_name} is not an IP-free LXD bridge."
+        if [[ "$network_type" != "bridge" || "$ipv4_address" != "$expected_ipv4" || "$ipv6_address" != "none" ]]; then
+            if [[ "$expected_ipv4" == "none" ]]; then
+                log_warn "Owned network ${network_name} is not an IP-free LXD bridge."
+            else
+                log_warn "Owned network ${network_name} is not an LXD bridge with gateway ${expected_ipv4}."
+            fi
             exit 1
         fi
         if [[ "$existing_cidr" != "$network_cidr" ]]; then
@@ -2281,14 +2337,19 @@ ensure_owned_microcloud_network() {
         return
     fi
 
-    log_info "Creating MicroCloud ${network_role} network: ${network_name}"
     create_args=(
         --type=bridge
-        ipv4.address=none
+        "ipv4.address=${expected_ipv4}"
         ipv6.address=none
         "user.lab-automation.owner=${env_name}"
         "user.lab-automation.role=${network_role}"
     )
+    if [[ "$expected_ipv4" != "none" ]]; then
+        log_info "Creating MicroCloud ${network_role} network: ${network_name} (gateway ${expected_ipv4} with NAT)"
+        create_args+=(ipv4.nat=true ipv4.dhcp=false)
+    else
+        log_info "Creating MicroCloud ${network_role} network: ${network_name}"
+    fi
     if [[ -n "$network_cidr" ]]; then
         create_args+=("user.lab-automation.cidr=${network_cidr}")
     fi
@@ -2525,6 +2586,7 @@ verify_microcloud_network_planes() {
 print_microcloud_summary() {
     local ws_name="$1"
     local lxd_prefix="${ws_name//_/-}"
+    local uplink_cidr=""
     local first_node=""
     local health="UNKNOWN"
     local health_upper="UNKNOWN"
@@ -2557,6 +2619,11 @@ print_microcloud_summary() {
         print_kv "OVN underlay" "$MICROCLOUD_OVN_UNDERLAY_CIDR"
         print_kv "Ceph general" "$MICROCLOUD_CEPH_GENERAL_CIDR"
     fi
+    uplink_cidr="$(get_microcloud_uplink_cidr "$ws_name")"
+    if [[ -n "$uplink_cidr" ]]; then
+        print_kv "OVN uplink subnet" "${uplink_cidr} (gateway $(microcloud_uplink_gateway "$uplink_cidr") on the host)"
+        print_kv "Forward/LB addresses" "$(microcloud_uplink_forward_routes "$uplink_cidr") (UPLINK ipv4.routes)"
+    fi
     print_kv "UI port" "8443"
     echo ""
     printf '  %-28s %-16s %s\n' "Node" "IP" "UI"
@@ -2576,6 +2643,7 @@ print_microcloud_summary() {
 print_microcloud_infra_summary() {
     local ws_name="$1"
     local lxd_prefix="${ws_name//_/-}"
+    local uplink_cidr=""
     local ip=""
 
     mapfile -t nodes < <(list_lxd_instances_by_prefix "${lxd_prefix}-node-" || true)
@@ -2596,6 +2664,18 @@ print_microcloud_infra_summary() {
     print_kv "MicroCloud packages" "Not installed (student task)"
     print_kv "Cluster init" "Not performed (student task)"
     print_kv "Local storage disk" "${MICROCLOUD_LOCAL_DISK_GIB} GB per node (third disk)"
+    uplink_cidr="$(get_microcloud_uplink_cidr "$ws_name")"
+    if [[ -n "$uplink_cidr" ]]; then
+        echo ""
+        echo "  OVN uplink values to enter during 'microcloud init':"
+        print_kv "IPv4 gateway (CIDR)" "$(microcloud_uplink_gateway "$uplink_cidr")"
+        print_kv "First IPv4 address" "$(microcloud_uplink_ovn_range "$uplink_cidr" | cut -d- -f1)"
+        print_kv "Last IPv4 address" "$(microcloud_uplink_ovn_range "$uplink_cidr" | cut -d- -f2)"
+        print_kv "DNS server" "$MICROCLOUD_UPLINK_DNS"
+        echo ""
+        echo "  For network forwards and load balancers, after 'microcloud init' run:"
+        echo "    lxc network set UPLINK ipv4.routes=$(microcloud_uplink_forward_routes "$uplink_cidr")"
+    fi
     echo ""
     printf '  %-28s %-16s %s\n' "Node" "IP" "Next Step"
     printf '  %-28s %-16s %s\n' "----------------------------" "----------------" "------------------------------"
@@ -2860,6 +2940,7 @@ deploy_lab() {
     local microcloud_ceph_general_cidr="${5:-$MICROCLOUD_CEPH_GENERAL_CIDR}"
     local microcloud_infra_only_tf="false"
     local microcloud_uplink_network_name=""
+    local microcloud_uplink_cidr=""
     local microcloud_ovn_underlay_network_name=""
     local microcloud_ceph_network_name=""
     local -a tofu_apply_args=()
@@ -2880,7 +2961,11 @@ deploy_lab() {
         microcloud_ovn_underlay_network_name="$(resolve_microcloud_plane_network_name "$workspace_name" "ovn")"
         microcloud_ceph_network_name="$(resolve_microcloud_plane_network_name "$workspace_name" "ceph")"
 
-        ensure_owned_microcloud_network "$microcloud_uplink_network_name" "$workspace_name" "ovn-uplink"
+        if ! microcloud_uplink_cidr="$(resolve_microcloud_uplink_cidr "$workspace_name" \
+            "$microcloud_ovn_underlay_cidr" "$microcloud_ceph_general_cidr")"; then
+            exit 1
+        fi
+        ensure_owned_microcloud_network "$microcloud_uplink_network_name" "$workspace_name" "ovn-uplink" "$microcloud_uplink_cidr"
         if [[ "$MICROCLOUD_NETWORK_MODE" == "fully-segregated-4nic" ]]; then
             ensure_owned_microcloud_network \
                 "$microcloud_ovn_underlay_network_name" "$workspace_name" \
@@ -2919,6 +3004,7 @@ deploy_lab() {
             -var="microcloud_local_disk_size_gib=${MICROCLOUD_LOCAL_DISK_GIB}"
             -var="microcloud_infra_only=${microcloud_infra_only_tf}"
             -var="microcloud_uplink_network_name=${microcloud_uplink_network_name}"
+            -var="microcloud_uplink_cidr=${microcloud_uplink_cidr}"
             -var="microcloud_network_mode=${MICROCLOUD_NETWORK_MODE}"
             -var="microcloud_ovn_underlay_network_name=${microcloud_ovn_underlay_network_name}"
             -var="microcloud_ceph_network_name=${microcloud_ceph_network_name}"
@@ -2928,6 +3014,11 @@ deploy_lab() {
         )
         log_info "MicroCloud topology: ${MICROCLOUD_NODE_COUNT} node(s), deployment mode=${DEPLOYMENT_MODE}"
         log_info "MicroCloud network mode: $(microcloud_network_mode_label)"
+        if [[ -n "$microcloud_uplink_cidr" ]]; then
+            log_info "MicroCloud OVN uplink subnet: ${microcloud_uplink_cidr} (host gateway $(microcloud_uplink_gateway "$microcloud_uplink_cidr"))"
+        else
+            log_warn "Existing lab without a per-lab uplink subnet: the OVN uplink stays IP-free and has no gateway on the host."
+        fi
         log_info "MicroCloud sizing: ${MICROCLOUD_NODE_CPU}vCPU/$((MICROCLOUD_NODE_MEMORY_MB / 1024))GB per node"
     elif [[ "$scenario" == "k8s-juju" ]]; then
         tofu_apply_args+=(
@@ -2947,6 +3038,7 @@ deploy_lab() {
     if [[ "$scenario" == "microcloud" ]]; then
         MICROCLOUD_OVN_UNDERLAY_CIDR="$microcloud_ovn_underlay_cidr"
         MICROCLOUD_CEPH_GENERAL_CIDR="$microcloud_ceph_general_cidr"
+        MICROCLOUD_UPLINK_CIDR="$microcloud_uplink_cidr"
         verify_microcloud_network_planes "$workspace_name" "$MICROCLOUD_NODE_COUNT"
     fi
 
@@ -3007,6 +3099,8 @@ run_batch_deployments() {
     local not_started="0"
     local ovn_cidr=""
     local ceph_cidr=""
+    local uplink_cidr=""
+    local uplink_info=""
     local -a results=()
 
     for index in "${!BATCH_WORKSPACE_NAMES[@]}"; do
@@ -3045,11 +3139,18 @@ run_batch_deployments() {
     tofu workspace select default >/dev/null 2>&1 || true
 
     print_section "Batch Deployment Summary"
-    printf '  %-28s %s\n' "Lab" "Result"
-    printf '  %-28s %s\n' "----------------------------" "-----------"
+    printf '  %-28s %-12s %s\n' "Lab" "Result" "OVN uplink gateway (for microcloud init)"
+    printf '  %-28s %-12s %s\n' "----------------------------" "-----------" "----------------------------------------"
     for index in "${!BATCH_WORKSPACE_NAMES[@]}"; do
         status="${results[$index]:-NOT STARTED}"
-        printf '  %-28s %s\n' "${BATCH_USER_PREFIXES[$index]}" "$status"
+        uplink_info="-"
+        if [[ "$scenario" == "microcloud" && "$status" == "SUCCESS" ]]; then
+            uplink_cidr="$(get_microcloud_uplink_cidr "${BATCH_WORKSPACE_NAMES[$index]}")"
+            if [[ "$uplink_cidr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
+                uplink_info="$(microcloud_uplink_gateway "$uplink_cidr"), range $(microcloud_uplink_ovn_range "$uplink_cidr")"
+            fi
+        fi
+        printf '  %-28s %-12s %s\n' "${BATCH_USER_PREFIXES[$index]}" "$status" "$uplink_info"
     done
     echo ""
     print_kv "Requested labs" "$BATCH_LAB_COUNT"

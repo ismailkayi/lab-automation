@@ -246,6 +246,17 @@ variable "microcloud_uplink_network_name" {
   default     = ""
 }
 
+variable "microcloud_uplink_cidr" {
+  description = "Per-lab OVN uplink /24; the host-side uplink bridge owns its first address as the gateway. Empty for labs created before per-lab uplink subnets."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.microcloud_uplink_cidr == "" || can(cidrhost(var.microcloud_uplink_cidr, 200))
+    error_message = "microcloud_uplink_cidr must be empty or an IPv4 subnet with at least 200 host addresses."
+  }
+}
+
 variable "microcloud_network_mode" {
   description = "MicroCloud network layout: standard-2nic or fully-segregated-4nic"
   type        = string
@@ -666,6 +677,7 @@ resource "local_file" "ansible_inventory" {
             microcloud_network_mode      = var.microcloud_network_mode
             microcloud_ovn_underlay_cidr = var.microcloud_ovn_underlay_cidr
             microcloud_ceph_general_cidr = var.microcloud_ceph_general_cidr
+            microcloud_uplink_cidr       = var.microcloud_uplink_cidr
           }
         }
         k8s_snap = {
