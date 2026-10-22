@@ -23,7 +23,7 @@
       failed_when: false
 
     - name: Install Canonical K8s snap if missing
-      command: snap install k8s --channel=1.32-classic/stable --classic
+      command: snap install k8s --channel=1.35-classic/stable --classic
       when: snap_check_k8s.rc != 0
       changed_when: true
 
@@ -112,10 +112,12 @@
       changed_when: false
 
     - name: Wait until all Kubernetes nodes are Ready
+      # Nodes stay NotReady until the CNI images are pulled; allow up to 20 minutes
+      # for slow or shared internet links.
       command: k8s kubectl get nodes --no-headers
       register: k8s_nodes_ready_check
       changed_when: false
-      retries: 24
+      retries: 120
       delay: 10
       until:
         - k8s_nodes_ready_check.rc == 0
