@@ -23,6 +23,7 @@ infrastructure-only training environment.
 
 - [Choose a Lab Type](#choose-a-lab-type)
 - [How the Automation Works](#how-the-automation-works)
+- [Product Versions](#product-versions)
 - [Requirements](#requirements)
 - [Install and Prepare the Host](#install-and-prepare-the-host)
 - [Quick Start](#quick-start)
@@ -76,6 +77,26 @@ Some terms used in this guide:
 - **CIDR**: an IP subnet written in a form such as `172.28.40.0/24`.
 - **Control plane**: Kubernetes nodes that manage the cluster.
 - **Worker**: a Kubernetes node intended to run workloads.
+
+## Product Versions
+
+Full deployments install the following snap channels and charms. Training
+deployments install nothing; participants install the products themselves.
+
+| Product | Channel |
+| --- | --- |
+| MicroCloud (LTS) | `microcloud` snap `3/stable` |
+| LXD | `lxd` snap `6/stable` |
+| MicroCeph | `microceph` snap `tentacle/stable` |
+| MicroOVN | `microovn` snap `26.03/stable` |
+| Canonical Kubernetes (Snap) | `k8s` snap `1.35-classic/stable` |
+| Juju (LTS) | `juju` snap `3.6/stable` |
+| Canonical Kubernetes (Juju) | `k8s` and `k8s-worker` charms `1.35/stable`, base `ubuntu@24.04` |
+
+The MicroCloud snaps are installed with `--cohort=+` in the order given in the
+MicroCloud documentation. On reruns, snaps that are already installed are not
+switched to another channel; the playbook warns instead, because moving a
+running cluster to another track is an upgrade.
 
 ## Requirements
 
