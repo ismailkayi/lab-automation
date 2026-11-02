@@ -3176,6 +3176,13 @@ destroy_menu() {
             | grep -v '^default$'
     )
     
+    local landscape_index=0 landscape_instances_found=""
+    landscape_instances_found="$(landscape_instances 2>/dev/null)" || landscape_instances_found=""
+    if [[ -n "$landscape_instances_found" || -f "$LANDSCAPE_SETTINGS" ]]; then
+        envs+=("Landscape demo (${LANDSCAPE_VM} + clients)")
+        landscape_index=${#envs[@]}
+    fi
+
     if [ ${#envs[@]} -eq 0 ]; then
         echo -e "${YELLOW}No active lab environments (workspaces) found to delete.${NC}"
         exit 0
@@ -3203,6 +3210,12 @@ destroy_menu() {
     fi
 
     selected_env=${envs[$((env_idx-1))]}
+    if (( env_idx == landscape_index )); then
+        read -p "Type 'yes' to destroy the Landscape demo: " destroy_confirm
+        [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; exit 0; }
+        landscape_destroy || exit 1
+        exit 0
+    fi
     local env_prefix=""
     local env_scenario=""
     local env_deployment_mode=""
@@ -3278,13 +3291,32 @@ print_section "TRAINING LABS - INFRASTRUCTURE ONLY"
 echo "  4) MicroCloud Training"
 echo "  5) Canonical K8s - Snap Training"
 echo "  6) Canonical K8s - Juju Training"
+echo "  7) Cluster Manager"
+print_section "INSTRUCTOR DEMOS"
+echo " 10) Landscape 26.04 (server + 3 registered clients)"
 print_section "ENVIRONMENT MANAGEMENT"
-echo "  7) Destroy Environments"
+echo "  8) Lab overview (nodes, uplink values, logins)"
+echo "  9) Destroy Environments"
 echo "  0) Exit"
 echo ""
 read -p "Select action: " action
 
+if [[ "$action" == "10" ]]; then
+    landscape_install
+    exit $?
+fi
+
 if [[ "$action" == "7" ]]; then
+    cluster_manager_menu
+    exit 0
+fi
+
+if [[ "$action" == "8" ]]; then
+    lab_overview
+    exit $?
+fi
+
+if [[ "$action" == "9" ]]; then
     destroy_menu
     exit 0
 fi
@@ -3785,7 +3817,15 @@ else
         "$MICROCLOUD_CEPH_GENERAL_CIDR"
 fi
 
+if [[ "$scenario" == "microcloud" ]]; then
+    lab_overview || log_warn "Could not show the lab overview. Run menu option 8 to retry."
+fi
+
 }
+
+source "${SCRIPT_DIR}/scripts/cluster_manager.sh"
+source "${SCRIPT_DIR}/scripts/landscape.sh"
+source "${SCRIPT_DIR}/scripts/lab_overview.sh"
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main "$@"

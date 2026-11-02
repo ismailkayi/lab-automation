@@ -34,6 +34,9 @@ infrastructure-only training environment.
 - [Deploy MicroCloud](#deploy-microcloud)
 - [Deploy Canonical Kubernetes (Snap)](#deploy-canonical-kubernetes-snap)
 - [Deploy Canonical Kubernetes (Juju)](#deploy-canonical-kubernetes-juju)
+- [Instructor Cluster Manager Service](#instructor-cluster-manager-service)
+- [Instructor Landscape Demo](#instructor-landscape-demo)
+- [Lab Overview](#lab-overview)
 - [Manage Existing Labs](#manage-existing-labs)
 - [Access a Lab](#access-a-lab)
 - [Safety and Operational Behavior](#safety-and-operational-behavior)
@@ -236,9 +239,14 @@ TRAINING LABS - INFRASTRUCTURE ONLY
   4) MicroCloud Training
   5) Canonical K8s - Snap Training
   6) Canonical K8s - Juju Training
+  7) Cluster Manager
+
+INSTRUCTOR DEMOS
+ 10) Landscape 26.04 (server + 3 registered clients)
 
 ENVIRONMENT MANAGEMENT
-  7) Destroy Environments
+  8) Lab overview (nodes, uplink values, logins)
+  9) Destroy Environments
   0) Exit
 ```
 
@@ -715,6 +723,107 @@ The Juju scenario supports in-place expansion:
 Existing node sizing is preserved, and new machines are reconciled into the
 Juju model. Shrinking in place is not supported; use **Rebuild** instead.
 
+## Instructor Cluster Manager Service
+
+Menu option **7) Cluster Manager** installs one shared MicroCloud Cluster
+Manager per lab host. Every participant gets a separate account, and all
+participants can see and manage every cluster registered on that host.
+Participants create their own join token in the UI.
+
+> [!WARNING]
+> Keycloak runs over **HTTP** and participant passwords are deliberately
+> simple (`admingroup1`, `admingroup2`, ...). Use the service only on the
+> private lab network or VPN.
+
+The installer creates a separate bridge, `lab-cmbr0`, using the first free
+`172.31.X.0/24`, and a separate VM, `lab-cluster-manager` (6 vCPU, 12 GiB RAM,
+80 GiB disk). Existing labs are not changed. Inside the VM,
+`scripts/cluster_manager_guest.sh` installs:
+
+- Canonical Kubernetes (`1.35-classic/stable`);
+- Juju (`3.6/stable`);
+- Keycloak `26.8.1`;
+- the Cluster Manager, PostgreSQL, Traefik and self-signed certificate charms.
+
+| Service | Address |
+| --- | --- |
+| Cluster Manager UI | `https://172.31.X.220` (self-signed certificate) |
+| Cluster Connector (from MicroCloud nodes) | `172.31.X.220:9100` |
+| Keycloak | `http://172.31.X.210:8080` |
+
+Choose **Install / resume / add participant accounts** to install, to continue
+after an error, or to raise the participant count. Completed steps are skipped,
+and network operations are retried. Output is shown live and appended to
+`~/.local/state/lab-automation/cluster-manager/setup.log`.
+
+The same directory contains:
+
+- `settings.env`: subnet, participant count and secrets;
+- `participant-access.csv`: participant usernames and passwords;
+- `instructor-access.txt`: the instructor and Keycloak administrator passwords.
+
+These files are owner-only; do not share them.
+
+Participants must reach both the Cluster Manager and the Keycloak address from
+their browser, because login redirects to Keycloak. Route the service subnet
+through the same tunnel or VPN used for the labs. MicroCloud nodes on the same
+host reach the Connector through the host.
+
+**Destroy Cluster Manager service** deletes only the VM, the bridge and the
+stored credentials.
+
+## Instructor Landscape Demo
+
+Select **10) Landscape 26.04** for a small Day 1 instructor-led demonstration.
+It installs everything in one step; remove it with **9) Destroy Environments >
+Landscape demo**. Other instances such as `landscape-2604` are not touched.
+
+| Component | Instance | Resources |
+| --- | --- | --- |
+| Landscape 26.04 LTS Quickstart | `lab-landscape` (Ubuntu 24.04 VM) | 2 vCPU, 8 GiB RAM, 40 GiB disk |
+| 3 registered Ubuntu 24.04 clients | `lab-landscape-client-1..3` (system containers) | 1 vCPU, 512 MiB RAM, 8 GiB disk each |
+
+- Ubuntu 24.04 is the server OS because Quickstart does not support 26.04; the
+  Landscape application is 26.04 from `ppa:landscape/self-hosted-26.04`.
+- The VM uses 16 GiB RAM during installation and restarts once with 8 GiB.
+- Only the required Task Handler and Outbox services are added (no Debarchive).
+- Clients are accepted automatically. Without Ubuntu Pro they appear unlicensed
+  (inventory works; package and script management do not). For a full demo, run
+  `LANDSCAPE_PRO_TOKEN=<token> ./orchestrate.sh` and select 10.
+- Rerunning option 10 resumes a failed installation and reuses existing instances.
+
+The end of the installation and **8) Lab overview** show the URL, login and the
+line `<server-IP> landscape.demo.internal` to add to `/etc/hosts` on the
+browser machine. Accept the self-signed certificate.
+
+State: `~/.local/state/lab-automation/landscape/` (`settings.env`, `setup.log`);
+guest log: `/var/log/lab-landscape-setup.log`.
+
+## Lab Overview
+
+Menu option **8) Lab overview** shows Cluster Manager, the Landscape demo and every lab
+on the host (MicroCloud, Canonical K8s Snap and Juju, training and full). For
+each lab it prints the nodes with IP address and state. For MicroCloud labs it
+also prints:
+
+- the OVN uplink values to enter in `microcloud init` (gateway, address range,
+  DNS);
+- the forward range to set as `UPLINK ipv4.routes` after `microcloud init`,
+  which network forwards and load balancers need;
+- the DR partner (consecutive training labs form a pair: `01` with `02`, `03`
+  with `04`; a last odd lab is paired with the instructor).
+
+The Cluster Manager section shows the address, the state of its VM and the
+number of participant accounts; logins are in menu 7, **Show access**.
+
+The lab rows (excluding instructor services) are also written to a CSV:
+
+```text
+~/.local/state/lab-automation/lab-overview/all-labs.csv
+```
+
+The overview is also shown at the end of every MicroCloud deployment.
+
 ## Manage Existing Labs
 
 When labs already exist for the selected scenario, the orchestrator offers:
@@ -958,6 +1067,12 @@ sharing logs.
 | `playbooks/microcloud.yml` | Full MicroCloud installation and validation |
 | `playbooks/k8s_snap.yml` | Full Canonical Kubernetes Snap deployment |
 | `playbooks/k8s_juju.yml` | Full Juju-managed Kubernetes deployment |
+| `scripts/cluster_manager.sh` | Instructor Cluster Manager menu (host side) |
+| `scripts/cluster_manager_guest.sh` | Cluster Manager installation inside the service VM |
+| `scripts/landscape.sh` | Instructor Landscape demo lifecycle |
+| `scripts/landscape_guest.sh` | Minimal Landscape 26.04 server installation |
+| `scripts/landscape_client.sh` | Single demo client registration |
+| `scripts/lab_overview.sh` | Instructor lab overview |
 | `tests/` | Targeted regression tests |
 | `docs/images/` | Documentation screenshots |
 | `terraform.tfstate.d/` | Per-workspace OpenTofu state generated at runtime |

@@ -1,0 +1,168 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+export PATH="$PATH:/snap/bin"
+export DEBIAN_FRONTEND=noninteractive
+# shellcheck source=/dev/null
+source /root/landscape.env
+exec >> /var/log/lab-landscape-setup.log 2>&1
+trap 'echo "ERROR at line ${LINENO}; fix the problem and rerun menu 10." >&2' ERR
+
+APT=(apt-get -y -q -o DPkg::Lock::Timeout=900
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+
+wait_web() {
+    local _ code
+    for _ in {1..120}; do
+        code="$(curl -ksS --max-time 10 --output /dev/null --write-out '%{http_code}' https://localhost/)" || code="unreachable"
+        [[ "$code" =~ ^(200|301|302|303)$ ]] && return 0
+        sleep 5
+    done
+    echo "Landscape HTTPS did not become ready: ${code}" >&2
+    return 1
+}
+
+wait_services() {
+    local service _
+    for service in landscape-task-handler.server landscape-task-handler.worker landscape-outbox.outbox; do
+        for _ in {1..60}; do
+            if systemctl is-active --quiet "snap.${service}.service"; then
+                break
+            fi
+            sleep 5
+        done
+        systemctl is-active "snap.${service}.service"
+    done
+}
+
+psql_query() { runuser -u postgres -- psql -v ON_ERROR_STOP=1 -tAq "$@"; }
+
+configure_service_dependencies() {
+    local service directory
+    for service in landscape-task-handler.server landscape-task-handler.worker landscape-outbox.outbox; do
+        directory="/etc/systemd/system/snap.${service}.service.d"
+        mkdir -p "$directory"
+        cat > "$directory/99-landscape-demo.conf" <<EOF
+[Unit]
+Requires=postgresql.service
+After=postgresql.service
+EOF
+        if [[ "$service" == "landscape-outbox.outbox" ]]; then
+            cat >> "$directory/99-landscape-demo.conf" <<EOF
+Requires=rabbitmq-server.service
+After=rabbitmq-server.service
+EOF
+        fi
+    done
+    systemctl daemon-reload
+    systemctl reset-failed snap.landscape-task-handler.server.service \
+        snap.landscape-task-handler.worker.service snap.landscape-outbox.outbox.service
+    systemctl start snap.landscape-task-handler.server.service \
+        snap.landscape-task-handler.worker.service snap.landscape-outbox.outbox.service
+}
+
+if [[ -f /var/lib/lab-landscape/ready ]]; then
+    configure_service_dependencies
+    wait_web
+    wait_services
+    echo "Landscape server is already configured."
+    exit 0
+fi
+
+echo "==> Preparing Ubuntu 24.04 for Landscape 26.04 LTS"
+cloud-init status --wait
+mkdir -p /var/lib/lab-landscape /etc/cloud/cloud.cfg.d /etc/systemd/system/lxd-agent.service.d
+cat > /etc/cloud/cloud.cfg.d/99-landscape-demo.cfg <<EOF
+preserve_hostname: true
+manage_etc_hosts: false
+EOF
+hostnamectl set-hostname "$FQDN"
+cat > /etc/systemd/system/lxd-agent.service.d/99-landscape-hostname.conf <<EOF
+[Service]
+ExecStartPost=/usr/bin/hostnamectl set-hostname ${FQDN}
+EOF
+systemctl daemon-reload
+if ! grep -qF "127.0.1.1 ${FQDN}" /etc/hosts; then
+    printf '127.0.1.1 %s\n' "$FQDN" >> /etc/hosts
+fi
+if [[ ! -f /swapfile ]]; then
+    fallocate -l 4G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+fi
+if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
+    swapon /swapfile
+fi
+grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+snap wait system seed.loaded
+"${APT[@]}" update
+"${APT[@]}" install software-properties-common curl ca-certificates
+add-apt-repository -y ppa:landscape/self-hosted-26.04
+"${APT[@]}" update
+"${APT[@]}" install landscape-server-quickstart
+version="$(dpkg-query -W -f='${Version}' landscape-server)"
+[[ "$version" == 26.04* ]] || { echo "Unexpected Landscape version: ${version}" >&2; exit 1; }
+
+echo "==> Configuring required Task Handler and Outbox services (no Debarchive)"
+if ! snap list landscape-task-handler >/dev/null 2>&1; then
+    snap install landscape-task-handler --channel=latest/stable
+fi
+if [[ "$(psql_query -c "SELECT 1 FROM pg_database WHERE datname='landscape-standalone-task-handler'")" != "1" ]]; then
+    runuser -u postgres -- createdb landscape-standalone-task-handler
+fi
+psql_query -d landscape-standalone-task-handler -c \
+    'GRANT CONNECT ON DATABASE "landscape-standalone-task-handler" TO landscape; GRANT CREATE ON SCHEMA public TO landscape;'
+db_password="$(python3 - <<'PY'
+import base64
+import configparser
+config = configparser.ConfigParser(interpolation=None, strict=False)
+config.read("/etc/landscape/service.conf")
+password = config.get("stores", "password")
+print(base64.b64decode(password[4:]).decode() if password.startswith("b64:") else password)
+PY
+)"
+snap set landscape-task-handler \
+    landscape.database.task-handler.host=localhost \
+    landscape.database.task-handler.port=5432 \
+    landscape.database.task-handler.name=landscape-standalone-task-handler \
+    landscape.database.task-handler.user=landscape \
+    "landscape.database.task-handler.password=${db_password}" \
+    landscape.database.task-handler.ssl=disable \
+    landscape.task-handler.server.grpc-port=50053 \
+    landscape.task-handler.server.host=localhost
+unset db_password
+if ! snap list landscape-outbox >/dev/null 2>&1; then
+    snap install landscape-outbox --channel=latest/stable
+fi
+snap connect landscape-outbox:grpc-client-certs landscape-task-handler:grpc-client-certs
+configure_service_dependencies
+
+echo "==> Creating instructor account"
+wait_web
+if [[ ! -f /var/lib/lab-landscape/account-ready ]]; then
+    /opt/canonical/landscape/bootstrap-account \
+        --admin_email "$ADMIN_EMAIL" --admin_name "Landscape Instructor" \
+        --admin_password "$ADMIN_PASSWORD" --registration_key "$REGISTRATION_KEY" \
+        --system_email "noreply@landscape.internal" --root_url "https://${FQDN}/"
+    touch /var/lib/lab-landscape/account-ready
+fi
+psql_query -d landscape-standalone-main -c \
+    "UPDATE account SET auto_register_new_computers = true WHERE name = 'standalone';"
+python3 - <<'PY'
+import configparser
+from pathlib import Path
+path = Path("/etc/landscape/service.conf")
+config = configparser.ConfigParser(interpolation=None, strict=False)
+config.read(path)
+if not config.has_section("features"):
+    config.add_section("features")
+config.set("features", "ubuntu_pro_licensing", "true")
+with path.open("w") as stream:
+    config.write(stream)
+PY
+lsctl restart
+wait_web
+wait_services
+touch /var/lib/lab-landscape/ready
+echo "==> Landscape ${version} server configured"
