@@ -12,13 +12,28 @@ if ! dpkg-query -W -f='${db:Status-Status}' landscape-client 2>/dev/null | grep 
     apt-get -q -o DPkg::Lock::Timeout=600 update
     apt-get -y -q -o DPkg::Lock::Timeout=600 install landscape-client ca-certificates
 fi
-if [[ -n "$PRO_TOKEN" ]]; then
-    attached="$(pro status --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["attached"])')"
-    if [[ "$attached" != "True" ]]; then
-        pro attach "$PRO_TOKEN" --no-auto-enable
-    fi
+pro_attached() {
+    pro api u.pro.status.is_attached.v1 |
+        python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["data"]["attributes"]["is_attached"] else 1)'
+}
+pro_enabled_services() {
+    pro api u.pro.status.enabled_services.v1 |
+        python3 -c 'import json, sys; print(" ".join(s["name"] for s in json.load(sys.stdin)["data"]["attributes"]["enabled_services"]))'
+}
+# A wrong token must not break the demo: warn and register the client without Pro.
+if [[ -n "$PRO_TOKEN" ]] && ! pro_attached; then
+    pro attach "$PRO_TOKEN" --no-auto-enable ||
+        echo "WARNING: Ubuntu Pro attach failed on $(hostname); continuing without Pro." >&2
 fi
 unset PRO_TOKEN
+if pro_attached; then
+    for service in esm-infra esm-apps; do
+        if [[ " $(pro_enabled_services) " != *" ${service} "* ]]; then
+            pro enable "$service" --assume-yes ||
+                echo "WARNING: Could not enable ${service} on $(hostname)." >&2
+        fi
+    done
+fi
 if ! grep -qF "${SERVER_IP} ${FQDN}" /etc/hosts; then
     printf '%s %s\n' "$SERVER_IP" "$FQDN" >> /etc/hosts
 fi

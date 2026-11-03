@@ -788,19 +788,40 @@ Landscape demo**. Other instances such as `landscape-2604` are not touched.
   Landscape application is 26.04 from `ppa:landscape/self-hosted-26.04`.
 - The clients start while the server is being installed and are registered at
   the end.
-- Only the required Task Handler and Outbox services are added (no Debarchive).
-- Clients are accepted automatically. Without a Landscape entitlement they may
-  appear unlicensed, without inventory or management actions. For a full demo, run
-  `LANDSCAPE_PRO_TOKEN=<token> ./orchestrate.sh` and select 10; a free personal
-  Ubuntu Pro token (up to 5 machines) is enough for the 3 clients.
+- Task Handler, Outbox and **Debarchive** are added. Debarchive backs the
+  **Repositories** pages (mirrors, local repositories, publications). For a
+  quick mirror demo, add an Ubuntu archive mirror for `noble`, `main`, `amd64`
+  with the filter `hello`: it downloads a single package in seconds. Do not
+  mirror a whole archive on the 40 GiB disk. The progress shown after
+  **Update** can stay at 0%; refresh the page to see the result.
+- Clients are accepted automatically.
+- Option 10 asks for an **Ubuntu Pro token** (shown as you paste it, so you
+  can check it; press Enter to skip). With a token, the 3 clients are attached
+  and **ESM Infra** and **ESM Apps** are enabled, so Landscape shows them as
+  licensed with ESM security updates. A free personal token (up to 5 machines)
+  is enough. The token is not saved to disk or written to the summary, and the
+  server VM is not attached.
+  - A wrong token only prints a warning; the clients are still registered
+    without Pro.
+  - Without a token, clients may appear unlicensed, without inventory or
+    management actions. Rerun option 10 with a token to attach them later.
+  - For unattended runs, set the token in advance with
+    `LANDSCAPE_PRO_TOKEN=<token> ./orchestrate.sh`, or use
+    `LANDSCAPE_PRO_TOKEN=` to skip the question.
+  - The summary prints the Pro state and the enabled services of each client.
 - Rerunning option 10 resumes a failed installation and reuses existing instances.
+- Destroy detaches Ubuntu Pro from each demo instance before deleting it, so
+  the token's machine slots are freed. If a detach fails, a warning asks you to
+  remove the machine at https://ubuntu.com/pro/dashboard.
 
 Open the **`https://<server-IP>/` URL** printed at the end of installation or in
 **8) Lab overview**, and accept the private demo's self-signed certificate.
 The server's DHCP address is reserved so that this URL survives restarts.
 No browser-side hosts entry or sudo is needed; `landscape.demo.internal` is
-only used internally by the demo clients. Old browser bookmarks for that
-hostname may still point at an earlier deployment: use the displayed IP URL.
+only used internally by the demo clients. Landscape's root URL is also set to
+the IP URL, so portal links such as **Switch to classic dashboard** open
+without a hosts entry. Old browser bookmarks for that hostname may still point
+at an earlier deployment: use the displayed IP URL.
 The script checks that exact URL, including redirects, before reporting success.
 Browsers on other machines still need a route to the lab subnet via VPN/tunnel.
 The host's `/etc/hosts` file is not modified.

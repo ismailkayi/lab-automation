@@ -34,6 +34,81 @@ grep -q -- '--registration-key="$REGISTRATION_KEY"' "${REPO_ROOT}/scripts/landsc
     fail "landscape-config must bind the registration key with ="
 
 (
+    unset LANDSCAPE_PRO_TOKEN
+    landscape_read_pro_token <<< "  C1abc 123  " >/dev/null
+    [[ "$LANDSCAPE_PRO_TOKEN" == "C1abc123" ]] || fail "Token must be read once with whitespace removed"
+    landscape_read_pro_token <<< "second" >/dev/null
+    [[ "$LANDSCAPE_PRO_TOKEN" == "C1abc123" ]] || fail "Token must not be asked twice"
+    unset LANDSCAPE_PRO_TOKEN
+    landscape_read_pro_token < /dev/null >/dev/null
+    [[ -z "$LANDSCAPE_PRO_TOKEN" ]] || fail "Enter/EOF must skip the token"
+    LANDSCAPE_PRO_TOKEN=""
+    output="$(landscape_read_pro_token <<< "unexpected")"
+    [[ -z "$output" ]] || fail "An exported (even empty) token must skip the question"
+)
+
+# Run the real client script with stub commands to check the Pro paths.
+run_client_script() {
+    local dir="$1" token="$2"
+    printf 'FQDN=demo\nSERVER_IP=10.1.1.2\nREGISTRATION_KEY=key\nPRO_TOKEN=%q\n' "$token" > "$dir/root/landscape-client.env"
+    echo cert > "$dir/root/landscape-server.pem"
+    : > "$dir/calls"
+    rm -f "$dir/registered"
+    sed -e "s#/root/#${dir}/root/#g" -e "s#/etc/hosts#${dir}/hosts#g" \
+        -e "s#/etc/landscape/server.pem#${dir}/server.pem#g" \
+        "${REPO_ROOT}/scripts/landscape_client.sh" > "$dir/client.sh"
+    PATH="${dir}/bin:$PATH" STUB_DIR="$dir" bash "$dir/client.sh"
+}
+(
+    ctmp="$(mktemp -d)"
+    trap 'rm -rf -- "$ctmp"' EXIT
+    mkdir -p "$ctmp/bin" "$ctmp/root"
+    touch "$ctmp/hosts" "$ctmp/enabled"
+    printf '#!/bin/sh\nexit 0\n' > "$ctmp/bin/cloud-init"
+    printf '#!/bin/sh\necho installed\n' > "$ctmp/bin/dpkg-query"
+    printf '#!/bin/sh\necho demo-client\n' > "$ctmp/bin/hostname"
+    cat > "$ctmp/bin/landscape-config" <<'STUB'
+#!/bin/bash
+[[ "$1" == "--is-registered" ]] && exec test -f "$STUB_DIR/registered"
+echo "landscape-config $*" >> "$STUB_DIR/calls"
+touch "$STUB_DIR/registered"
+STUB
+    cat > "$ctmp/bin/pro" <<'STUB'
+#!/bin/bash
+case "$1 $2" in
+    "api u.pro.status.is_attached.v1")
+        [[ -f "$STUB_DIR/attached" ]] && v=true || v=false
+        echo "{\"data\": {\"attributes\": {\"is_attached\": $v}}}" ;;
+    "api u.pro.status.enabled_services.v1")
+        python3 -c 'import json, sys; print(json.dumps({"data": {"attributes": {"enabled_services": [{"name": n.strip()} for n in open(sys.argv[1]) if n.strip()]}}}))' "$STUB_DIR/enabled" ;;
+    attach*) echo "pro $*" >> "$STUB_DIR/calls"; [[ "$2" == "GOOD" ]] || exit 1; touch "$STUB_DIR/attached" ;;
+    enable*) echo "pro $*" >> "$STUB_DIR/calls"; echo "$2" >> "$STUB_DIR/enabled" ;;
+    *) exit 2 ;;
+esac
+STUB
+    chmod +x "$ctmp/bin/"*
+
+    output="$(run_client_script "$ctmp" BAD 2>&1)" || fail "A wrong Pro token must not abort client setup: $output"
+    assert_contains "$output" "WARNING: Ubuntu Pro attach failed"
+    calls="$(cat "$ctmp/calls")"
+    assert_contains "$calls" "pro attach BAD --no-auto-enable"
+    assert_contains "$calls" "landscape-config --silent"
+    [[ "$calls" != *"pro enable"* ]] || fail "ESM must not be enabled on an unattached client"
+    [[ ! -e "$ctmp/root/landscape-client.env" ]] || fail "Client env with the token must be removed"
+
+    run_client_script "$ctmp" GOOD >/dev/null 2>&1 || fail "Client setup with a valid token failed"
+    calls="$(cat "$ctmp/calls")"
+    assert_contains "$calls" $'pro attach GOOD --no-auto-enable\npro enable esm-infra --assume-yes\npro enable esm-apps --assume-yes'
+
+    echo esm-infra > "$ctmp/enabled"
+    run_client_script "$ctmp" "" >/dev/null 2>&1 || fail "Resume of an attached client failed"
+    calls="$(cat "$ctmp/calls")"
+    [[ "$calls" != *"pro attach"* ]] || fail "An attached client must not be attached again"
+    [[ "$calls" != *"enable esm-infra"* ]] || fail "Enabled ESM services must not be enabled again"
+    assert_contains "$calls" "pro enable esm-apps --assume-yes"
+)
+
+(
     lxc() { cat >/dev/null; }
     {
         landscape_lxc exec local:lab-landscape -- true
@@ -110,18 +185,31 @@ grep -q -- '--registration-key="$REGISTRATION_KEY"' "${REPO_ROOT}/scripts/landsc
 (
     : > "$TMP/calls"
     landscape_lxc() {
-        echo "$*" >> "$TMP/calls"
-        if [[ "$1" == "list" ]]; then
-            [[ "$*" == "list local: user.lab-automation.component=landscape-demo -c n -f csv" ]] \
-                || fail "Destroy must select only labelled demo instances: $*"
-            printf 'lab-landscape\nlab-landscape-client-1\n'
-        fi
+        case "$1" in
+            list)
+                [[ "$*" == "list local: user.lab-automation.component=landscape-demo -c n -f csv" ]] \
+                    || fail "Destroy must select only labelled demo instances: $*"
+                printf 'lab-landscape\nlab-landscape-client-1\nlab-landscape-client-2\n' ;;
+            exec)
+                [[ "${*: -1}" == "detach" ]] || fail "Destroy must only ask for a Pro detach: $*"
+                echo "pro-detach $2" >> "$TMP/calls"
+                case "$2" in
+                    local:lab-landscape) echo "not attached" ;;
+                    local:lab-landscape-client-1) echo "detached" ;;
+                    *) return 1 ;;
+                esac ;;
+            *) echo "$*" >> "$TMP/calls" ;;
+        esac
     }
     cp "$LANDSCAPE_SETTINGS" "$TMP/settings.bak"
-    landscape_destroy >/dev/null
+    output="$(landscape_destroy 2>&1)"
     calls="$(cat "$TMP/calls")"
-    assert_contains "$calls" "delete --force local:lab-landscape"
-    assert_contains "$calls" "delete --force local:lab-landscape-client-1"
+    assert_contains "$calls" $'pro-detach local:lab-landscape\ndelete --force local:lab-landscape\n'
+    assert_contains "$calls" $'pro-detach local:lab-landscape-client-1\ndelete --force local:lab-landscape-client-1'
+    assert_contains "$calls" $'pro-detach local:lab-landscape-client-2\ndelete --force local:lab-landscape-client-2'
+    assert_contains "$output" "Ubuntu Pro detached from lab-landscape-client-1"
+    assert_contains "$output" "Could not check Ubuntu Pro on lab-landscape-client-2"
+    [[ "$output" != *"on lab-landscape;"* ]] || fail "Unattached instances must not warn"
     [[ ! -f "$LANDSCAPE_SETTINGS" ]] || fail "Destroy must remove demo credentials"
     mv "$TMP/settings.bak" "$LANDSCAPE_SETTINGS"
 )
@@ -131,11 +219,14 @@ grep -q -- '--registration-key="$REGISTRATION_KEY"' "${REPO_ROOT}/scripts/landsc
     landscape_lxc() {
         case "$1 $2" in
             "file pull") echo "cert" > "$4" ;;
-            "file push") [[ -s "$3" ]] || fail "Pushed file must exist: $3"; echo "push $4" >> "$TMP/calls" ;;
+            "file push")
+                [[ -s "$3" ]] || fail "Pushed file must exist: $3"
+                [[ "$3" != *client.env ]] || grep -qx 'PRO_TOKEN=T0K' "$3" || fail "Client env must carry the Pro token"
+                echo "push $4" >> "$TMP/calls" ;;
             "exec local:lab-landscape-client-1") echo "exec" >> "$TMP/calls" ;;
         esac
     }
-    landscape_setup_client 10.1.1.2 lab-landscape-client-1
+    LANDSCAPE_PRO_TOKEN=T0K landscape_setup_client 10.1.1.2 lab-landscape-client-1
     calls="$(cat "$TMP/calls")"
     assert_contains "$calls" "push local:lab-landscape-client-1/root/landscape-client.env"
     assert_contains "$calls" "push local:lab-landscape-client-1/root/landscape-server.pem"
@@ -150,11 +241,12 @@ grep -q -- '--registration-key="$REGISTRATION_KEY"' "${REPO_ROOT}/scripts/landsc
 )
 
 install_stubs() {
+    LANDSCAPE_PRO_TOKEN=""
     landscape_prepare_settings() { :; }
     landscape_ensure_instance() { echo "ensure $1 $2 $3" >> "$TMP/calls"; }
     landscape_ip() { echo "10.1.1.2"; }
     landscape_lxc() { :; }
-    landscape_run_setup() { echo "setup" >> "$TMP/calls"; }
+    landscape_run_setup() { echo "setup $1" >> "$TMP/calls"; }
     landscape_check_web() { echo "access $1" >> "$TMP/calls"; }
     landscape_setup_client() { echo "register $2" >> "$TMP/calls"; }
 }
@@ -187,14 +279,46 @@ install_stubs() {
 (
     : > "$TMP/calls"
     install_stubs
+    landscape_lxc() { echo "not attached"; }
     output="$(landscape_install)"
     calls="$(cat "$TMP/calls")"
-    assert_contains "$calls" $'ensure lab-landscape server ubuntu:24.04\nensure lab-landscape-client-2604 client ubuntu:26.04\nensure lab-landscape-client-2404 client ubuntu:24.04\nensure lab-landscape-client-2204 client ubuntu:22.04\nsetup\naccess 10.1.1.2'
+    assert_contains "$calls" $'ensure lab-landscape server ubuntu:24.04\nensure lab-landscape-client-2604 client ubuntu:26.04\nensure lab-landscape-client-2404 client ubuntu:24.04\nensure lab-landscape-client-2204 client ubuntu:22.04\nsetup 10.1.1.2\naccess 10.1.1.2'
     assert_contains "$calls" $'register lab-landscape-client-2604\nregister lab-landscape-client-2404\nregister lab-landscape-client-2204'
     assert_contains "$output" "Login"
     assert_contains "$output" "https://10.1.1.2/"
     [[ "$output" != *"https://landscape.demo.internal"* ]] || fail "Browser URL must not require a hosts entry"
     assert_contains "$output" "lab-landscape-client-2604 lab-landscape-client-2404 lab-landscape-client-2204"
+    assert_contains "$output" "no token entered"
+)
+
+(
+    install_stubs
+    landscape_lxc() { echo "attached; enabled: esm-apps, esm-infra"; }
+    output="$(landscape_install)"
+    [[ "$output" != *"no token entered"* ]] || fail "Already attached clients must not get the missing-token warning"
+)
+
+(
+    : > "$TMP/calls"
+    install_stubs
+    unset LANDSCAPE_PRO_TOKEN
+    landscape_ensure_instance() { echo "ensure $1 token=${LANDSCAPE_PRO_TOKEN-unset}" >> "$TMP/calls"; }
+    landscape_setup_client() { echo "register $2 token=${LANDSCAPE_PRO_TOKEN}" >> "$TMP/calls"; }
+    landscape_lxc() {
+        [[ "$1 ${*: -1}" == "exec $LANDSCAPE_PRO_PY" ]] || fail "Summary must only query Pro status: $*"
+        [[ "$2" == "local:lab-landscape-client-2204" ]] && return 1
+        echo "attached; enabled: esm-apps, esm-infra"
+    }
+    output="$(landscape_install <<< "C1token")"
+    calls="$(cat "$TMP/calls")"
+    assert_contains "$calls" "ensure lab-landscape token=C1token"
+    assert_contains "$calls" "register lab-landscape-client-2204 token=C1token"
+    grep -q C1token "$LANDSCAPE_SETTINGS" && fail "The Pro token must not be saved"
+    [[ "$output" != *C1token* ]] || fail "The Pro token must not be printed"
+    [[ "$output" != *"no token entered"* ]] || fail "A supplied token must not be reported as missing"
+    assert_contains "$output" "Pro lab-landscape-client-2604"
+    assert_contains "$output" "attached; enabled: esm-apps, esm-infra"
+    assert_contains "$output" "status unknown"
 )
 
 (
@@ -243,20 +367,46 @@ install_stubs() {
     landscape_lxc() {
         case "$1" in
             file) echo "push $4" >> "$TMP/calls" ;;
-            exec) echo "guest output"; return 3 ;;
+            exec) echo "exec $*" >> "$TMP/calls"; echo "guest output"; return 3 ;;
         esac
     }
     : > "$TMP/setup.log"
-    if landscape_run_setup >/dev/null; then
+    if landscape_run_setup 10.1.1.2 >/dev/null; then
         fail "Guest setup failure must propagate through tee"
     fi
     assert_contains "$(cat "$TMP/setup.log")" "guest output"
     assert_contains "$(cat "$TMP/calls")" "push local:lab-landscape/root/landscape-setup.sh"
+    assert_contains "$(cat "$TMP/calls")" "exec local:lab-landscape --env SERVER_IP=10.1.1.2 -- bash /root/landscape-setup.sh"
     landscape_lxc() { return 0; }
     tee() { cat >/dev/null; return 1; }
-    if landscape_run_setup >/dev/null; then
+    if landscape_run_setup 10.1.1.2 >/dev/null; then
         fail "A setup.log write failure must propagate"
     fi
+)
+
+# Run the real guest helper on a copy of service.conf.
+(
+    gtmp="$(mktemp -d)"
+    trap 'rm -rf -- "$gtmp"' EXIT
+    guest="${REPO_ROOT}/scripts/landscape_guest.sh"
+    printf '[stores]\nhost = localhost\n\n[system]\nroot_url = https://landscape.demo.internal/\n' > "$gtmp/service.conf"
+    eval "$(sed -n '/^configure_service_conf() {/,/^}/p' "$guest" | sed "s#/etc/landscape/service.conf#${gtmp}/service.conf#")"
+    export SERVER_IP=10.1.1.2
+    [[ "$(configure_service_conf)" == "changed" ]] || fail "A hostname root_url must be replaced"
+    python3 - "$gtmp/service.conf" <<'PY' || fail "service.conf must use the IP root_url and keep other settings"
+import configparser, sys
+c = configparser.ConfigParser(interpolation=None)
+c.read(sys.argv[1])
+assert c["system"]["root_url"] == "https://10.1.1.2/"
+assert c["features"]["ubuntu_pro_licensing"] == "true"
+assert c["stores"]["host"] == "localhost"
+PY
+    [[ -z "$(configure_service_conf)" ]] || fail "An unchanged service.conf must not restart Landscape"
+    resume="$(sed -n '/^if \[\[ -f \/var\/lib\/lab-landscape\/ready \]\]; then/,/^fi/p' "$guest")"
+    assert_contains "$resume" $'configure_debarchive\n    configure_service_dependencies\n    service_conf="$(configure_service_conf)"\n    if [[ "$service_conf" == "changed" ]]; then\n        lsctl restart'
+    assert_contains "$resume" "wait_debarchive"
+    grep -q 'landscape-debarchive.debarchive' "$guest" || fail "Debarchive must be a checked service"
+    grep -qF -- '--root_url "https://${SERVER_IP}/"' "$guest" || fail "The account root URL must use the server IP"
 )
 
 (
@@ -319,4 +469,4 @@ install_stubs() {
     assert_contains "$(cat "$TMP/calls")" "cm removed"
 )
 
-echo "PASS: Landscape settings, dash-safe secrets, sizing, IP access, mixed clients, overview and instructor service cleanup"
+echo "PASS: Landscape settings, dash-safe secrets, Pro token/ESM/detach, Debarchive, IP root URL, sizing, IP access, mixed clients, overview and instructor service cleanup"

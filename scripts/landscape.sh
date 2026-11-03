@@ -11,6 +11,34 @@ LANDSCAPE_SETTINGS="${LANDSCAPE_STATE_DIR}/settings.env"
 
 landscape_lxc() { lxc --project default "$@" </dev/null; }
 
+# Runs inside an instance; prints "not attached", "attached; enabled: ..." or, with "detach", "detached".
+LANDSCAPE_PRO_PY='
+import json, subprocess, sys
+def api(endpoint):
+    out = subprocess.run(["pro", "api", endpoint], capture_output=True, text=True, check=True).stdout
+    return json.loads(out)["data"]["attributes"]
+if not api("u.pro.status.is_attached.v1")["is_attached"]:
+    print("not attached")
+elif sys.argv[1:] == ["detach"]:
+    subprocess.run(["pro", "detach", "--assume-yes"], capture_output=True, check=True)
+    print("detached")
+else:
+    names = [s["name"] for s in api("u.pro.status.enabled_services.v1")["enabled_services"]]
+    print("attached; enabled: " + (", ".join(names) or "none"))
+'
+
+landscape_pro() { landscape_lxc exec "local:$1" -- python3 -c "$LANDSCAPE_PRO_PY" "${@:2}"; }
+
+# Asked once per run; an exported LANDSCAPE_PRO_TOKEN (even empty) skips the question.
+landscape_read_pro_token() {
+    local token=""
+    [[ -n "${LANDSCAPE_PRO_TOKEN+set}" ]] && return 0
+    echo "An Ubuntu Pro token attaches the demo clients and enables ESM Infra and ESM Apps."
+    echo "A free personal token (up to 5 machines) is available at https://ubuntu.com/pro."
+    read -r -p "Ubuntu Pro token (press Enter to skip): " token || token=""
+    LANDSCAPE_PRO_TOKEN="${token//[[:space:]]/}"
+}
+
 landscape_status() { landscape_lxc list "local:^${1}$" -c s -f csv; }
 
 landscape_owned() {
@@ -105,11 +133,12 @@ landscape_ensure_instance() {
 }
 
 landscape_run_setup() {
+    local ip="$1"
     landscape_lxc file push "$LANDSCAPE_SETTINGS" "local:${LANDSCAPE_VM}/root/landscape.env" --mode 0600 || return 1
     landscape_lxc file push "${SCRIPT_DIR}/scripts/landscape_guest.sh" \
         "local:${LANDSCAPE_VM}/root/landscape-setup.sh" --mode 0700 || return 1
     log_info "Installing or checking the Landscape server; output is also saved to ${LANDSCAPE_STATE_DIR}/setup.log"
-    landscape_lxc exec "local:${LANDSCAPE_VM}" -- bash /root/landscape-setup.sh 2>&1 \
+    landscape_lxc exec "local:${LANDSCAPE_VM}" --env "SERVER_IP=${ip}" -- bash /root/landscape-setup.sh 2>&1 \
         | tee -a "${LANDSCAPE_STATE_DIR}/setup.log"
     local -a status=("${PIPESTATUS[@]}")
     if (( status[0] != 0 || status[1] != 0 )); then
@@ -163,13 +192,14 @@ landscape_instances() {
 }
 
 landscape_install() {
-    local ip release client
+    local ip release client pro missing_pro=0
     local -a clients=()
     if [[ ! -f "$LANDSCAPE_SETTINGS" ]] && landscape_lxc info "local:${LANDSCAPE_VM}" >/dev/null 2>&1; then
         log_warn "The Landscape instance exists but saved settings are missing; refusing to replace its credentials."
         return 1
     fi
     landscape_prepare_settings || return 1
+    landscape_read_pro_token
     # shellcheck source=/dev/null
     source "$LANDSCAPE_SETTINGS"
     landscape_ensure_instance "$LANDSCAPE_VM" server ubuntu:24.04 || return 1
@@ -179,11 +209,11 @@ landscape_install() {
         landscape_ensure_instance "$client" client "ubuntu:${release}" || return 1
         clients+=("$client")
     done
-    if ! landscape_run_setup; then
+    ip="$(landscape_ip "$LANDSCAPE_VM")" || return 1
+    if ! landscape_run_setup "$ip"; then
         log_warn "Fix the reported problem and rerun menu 10; existing resources are kept."
         return 1
     fi
-    ip="$(landscape_ip "$LANDSCAPE_VM")" || return 1
     landscape_check_web "$ip" || return 1
     for client in "${clients[@]}"; do
         log_info "Registering ${client}"
@@ -196,8 +226,13 @@ landscape_install() {
     print_kv "Server IP" "$ip"
     print_kv "Access" "Use the IP URL above; no hosts entry is needed. Remote browsers need the lab VPN/tunnel."
     print_kv "Registered clients" "${clients[*]}"
-    if [[ -z "${LANDSCAPE_PRO_TOKEN:-}" ]]; then
-        print_kv "Ubuntu Pro" "no token supplied; existing attachments are kept. Unlicensed clients may lack inventory and management actions."
+    for client in "${clients[@]}"; do
+        pro="$(landscape_pro "$client" 2>/dev/null)" || pro="status unknown"
+        [[ "$pro" == "not attached" ]] && missing_pro=1
+        print_kv "Pro ${client}" "$pro"
+    done
+    if [[ -z "${LANDSCAPE_PRO_TOKEN:-}" ]] && (( missing_pro )); then
+        print_kv "Ubuntu Pro" "no token entered; unattached clients may lack inventory and management actions. Rerun menu 10 to add one."
     fi
 }
 
@@ -208,6 +243,12 @@ landscape_destroy() {
         return 1
     }
     for instance in $instances; do
+        # Detach first so deleted demo machines do not keep using Pro token seats.
+        case "$(landscape_pro "$instance" detach 2>/dev/null)" in
+            detached) log_info "Ubuntu Pro detached from ${instance}." ;;
+            "not attached") ;;
+            *) log_warn "Could not check Ubuntu Pro on ${instance}; if it was attached, remove it at https://ubuntu.com/pro/dashboard." ;;
+        esac
         landscape_lxc delete --force "local:${instance}" || return 1
     done
     rm -f -- "$LANDSCAPE_SETTINGS" "${LANDSCAPE_STATE_DIR}/setup.log" || return 1
