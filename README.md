@@ -777,9 +777,15 @@ Manager**) deletes only the VM, the bridge and the stored credentials.
 
 ## Instructor Landscape Demo
 
-Select **10) Landscape 26.04** for a small Day 1 instructor-led demonstration.
+Select **10) Landscape 26.04** for a small instructor-led demonstration.
 It installs everything in one step; remove it with **9) Destroy Environments >
 Landscape demo**. Other instances such as `landscape-2604` are not touched.
+
+In the five-day MicroCloud training, show Landscape and COS on **Day 5**, after
+the lab review and before Production Q&A. Use a separate instructor host;
+participants do not install these services or get extra lab tasks or quiz
+questions. MAAS is planned for the same demo block, but its automation is not
+implemented yet.
 
 | Component | Instance | Resources |
 | --- | --- | --- |
