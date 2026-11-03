@@ -27,7 +27,7 @@ if ! landscape-config --is-registered; then
     landscape-config --silent --account-name standalone \
         --computer-title "$(hostname)" \
         --url "https://${FQDN}/message-system" --ping-url "http://${FQDN}/ping" \
-        --ssl-public-key /etc/landscape/server.pem --registration-key "$REGISTRATION_KEY" \
+        --ssl-public-key /etc/landscape/server.pem --registration-key="$REGISTRATION_KEY" \
         --tags instructor-demo --script-users root --include-manager-plugins ScriptExecution
 fi
 for _ in {1..60}; do

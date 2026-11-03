@@ -3176,7 +3176,11 @@ destroy_menu() {
             | grep -v '^default$'
     )
     
-    local landscape_index=0 landscape_instances_found=""
+    local cm_index=0 landscape_index=0 landscape_instances_found=""
+    if cm_installed; then
+        envs+=("Cluster Manager (${CM_VM} + ${CM_NETWORK})")
+        cm_index=${#envs[@]}
+    fi
     landscape_instances_found="$(landscape_instances 2>/dev/null)" || landscape_instances_found=""
     if [[ -n "$landscape_instances_found" || -f "$LANDSCAPE_SETTINGS" ]]; then
         envs+=("Landscape demo (${LANDSCAPE_VM} + clients)")
@@ -3210,6 +3214,13 @@ destroy_menu() {
     fi
 
     selected_env=${envs[$((env_idx-1))]}
+    if (( env_idx == cm_index )); then
+        cm_destroy_warning
+        read -p "Type 'yes' to destroy the Cluster Manager service: " destroy_confirm
+        [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; exit 0; }
+        cm_remove || exit 1
+        exit 0
+    fi
     if (( env_idx == landscape_index )); then
         read -p "Type 'yes' to destroy the Landscape demo: " destroy_confirm
         [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; exit 0; }
@@ -3292,11 +3303,12 @@ echo "  4) MicroCloud Training"
 echo "  5) Canonical K8s - Snap Training"
 echo "  6) Canonical K8s - Juju Training"
 echo "  7) Cluster Manager"
-print_section "INSTRUCTOR DEMOS"
-echo " 10) Landscape 26.04 (server + 3 registered clients)"
 print_section "ENVIRONMENT MANAGEMENT"
 echo "  8) Lab overview (nodes, uplink values, logins)"
 echo "  9) Destroy Environments"
+print_section "INSTRUCTOR DEMOS"
+echo " 10) Landscape 26.04 (server + Ubuntu 26.04/24.04/22.04 clients)"
+echo ""
 echo "  0) Exit"
 echo ""
 read -p "Select action: " action

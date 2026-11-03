@@ -70,8 +70,7 @@ lab_overview_landscape() {
     fi
     if [[ "$state" == "RUNNING" ]]; then
         ip="$(landscape_ip "$LANDSCAPE_VM")" || return 1
-        print_kv "Landscape demo" "https://landscape.demo.internal/ (${ip}, VM: ${state})"
-        print_kv "  browser /etc/hosts" "${ip} landscape.demo.internal"
+        print_kv "Landscape demo" "https://${ip}/ (VM: ${state}, self-signed certificate)"
     else
         print_kv "Landscape demo" "${LANDSCAPE_VM} (VM: ${state})"
     fi

@@ -2,8 +2,10 @@
 # Instructor-only Landscape demo; sourced by orchestrate.sh.
 
 LANDSCAPE_VM="lab-landscape"
+LANDSCAPE_FQDN="landscape.demo.internal"
 LANDSCAPE_CLIENT_PREFIX="lab-landscape-client"
-LANDSCAPE_CLIENT_COUNT=3
+# One client per Ubuntu release gives the demo a mixed inventory.
+LANDSCAPE_CLIENT_RELEASES=(26.04 24.04 22.04)
 LANDSCAPE_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/lab-automation/landscape"
 LANDSCAPE_SETTINGS="${LANDSCAPE_STATE_DIR}/settings.env"
 
@@ -20,17 +22,22 @@ landscape_owned() {
     fi
 }
 
+# Letters and digits only: a leading "-" would be parsed as an option by bootstrap-account.
+landscape_random_secret() {
+    python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(24)))'
+}
+
 landscape_prepare_settings() {
     local password key
     mkdir -p "$LANDSCAPE_STATE_DIR" || return 1
     chmod 700 "$LANDSCAPE_STATE_DIR" || return 1
     [[ -f "$LANDSCAPE_SETTINGS" ]] && return 0
-    password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')" || return 1
-    key="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')" || return 1
+    password="$(landscape_random_secret)" || return 1
+    key="$(landscape_random_secret)" || return 1
     (
         umask 077
         printf 'FQDN=%q\nADMIN_EMAIL=%q\nADMIN_PASSWORD=%q\nREGISTRATION_KEY=%q\n' \
-            "landscape.demo.internal" "instructor@landscape.internal" \
+            "$LANDSCAPE_FQDN" "instructor@landscape.internal" \
             "$password" "$key" \
             > "$LANDSCAPE_SETTINGS"
     )
@@ -63,7 +70,7 @@ sys.exit("No global IPv4 address found for " + sys.argv[1])
 }
 
 landscape_ensure_instance() {
-    local name="$1" kind="$2" _ ip
+    local name="$1" kind="$2" image="$3" _ ip
     local -a options=()
     if landscape_lxc info "local:${name}" >/dev/null 2>&1; then
         landscape_owned "$name" || return 1
@@ -76,15 +83,16 @@ landscape_ensure_instance() {
             return 1
         }
         if [[ "$kind" == "server" ]]; then
-            options=(--vm -c limits.cpu=2 -c limits.memory=16GiB -d "root,size=40GiB")
+            options=(--vm -c limits.cpu=2 -c limits.memory=8GiB -d "root,size=40GiB")
         else
             options=(-c limits.cpu=1 -c limits.memory=512MiB -d "root,size=8GiB")
         fi
-        landscape_lxc launch ubuntu:24.04 "local:${name}" \
+        landscape_lxc launch "$image" "local:${name}" \
             --network "$LXD_NETWORK_NAME" --storage "$LXD_STORAGE_POOL" \
             -c user.lab-automation.component=landscape-demo "${options[@]}" || return 1
     fi
     landscape_wait_agent "$name" || return 1
+    [[ "$kind" == "server" ]] || return 0
     for _ in {1..60}; do
         if ip="$(landscape_ip "$name" 2>/dev/null)"; then
             break
@@ -92,88 +100,34 @@ landscape_ensure_instance() {
         sleep 2
     done
     [[ -n "${ip:-}" ]] || { log_warn "No IPv4 address for ${name}."; return 1; }
-    if [[ "$kind" == "server" ]]; then
-        # --network creates a local eth0 device; reserve its current DHCP address.
-        landscape_lxc config device set "local:${name}" eth0 ipv4.address="$ip" || return 1
-    fi
+    # Keep the advertised browser URL stable across server restarts.
+    landscape_lxc config device set "local:${name}" eth0 ipv4.address="$ip"
 }
 
-landscape_set_memory() {
-    local memory="$1" current
-    current="$(landscape_lxc config get "local:${LANDSCAPE_VM}" limits.memory)" || return 1
-    [[ "$current" == "$memory" ]] && return 0
-    # Cold resize avoids LXD ballooning timeouts after the large initial DB import.
-    log_info "Restarting ${LANDSCAPE_VM} to set RAM to ${memory}."
-    landscape_lxc stop "local:${LANDSCAPE_VM}" --timeout 120 || return 1
-    landscape_lxc config set "local:${LANDSCAPE_VM}" limits.memory="$memory" || return 1
-    landscape_lxc start "local:${LANDSCAPE_VM}" || return 1
-    landscape_wait_agent "$LANDSCAPE_VM"
-}
-
-landscape_run_setup() (
-    local unit="lab-landscape-setup" result="" status="" offset=0 chunk
-    local log="/var/log/lab-landscape-setup.log" deadline=$((SECONDS + 3600))
-    chunk="$(mktemp "${LANDSCAPE_STATE_DIR}/output.XXXXXX")" || return 1
-    trap 'rm -f -- "$chunk"' EXIT
-    offset="$(landscape_lxc exec "local:${LANDSCAPE_VM}" -- bash -c \
-        'if [[ -f "$1" ]]; then stat -c %s "$1"; else echo 0; fi' -- "$log")" || return 1
-
-    status="$(landscape_lxc exec "local:${LANDSCAPE_VM}" -- systemctl is-active "$unit" 2>/dev/null)" || :
-    if [[ "$status" != "active" && "$status" != "activating" ]]; then
-        landscape_lxc exec "local:${LANDSCAPE_VM}" -- rm -f /root/landscape-setup.result || return 1
-        landscape_lxc exec "local:${LANDSCAPE_VM}" -- systemd-run \
-            --unit="$unit" --collect /bin/bash -c \
-            '/root/landscape-setup.sh; result=$?; echo "$result" > /root/landscape-setup.result; exit "$result"' || return 1
+landscape_run_setup() {
+    landscape_lxc file push "$LANDSCAPE_SETTINGS" "local:${LANDSCAPE_VM}/root/landscape.env" --mode 0600 || return 1
+    landscape_lxc file push "${SCRIPT_DIR}/scripts/landscape_guest.sh" \
+        "local:${LANDSCAPE_VM}/root/landscape-setup.sh" --mode 0700 || return 1
+    log_info "Installing or checking the Landscape server; output is also saved to ${LANDSCAPE_STATE_DIR}/setup.log"
+    landscape_lxc exec "local:${LANDSCAPE_VM}" -- bash /root/landscape-setup.sh 2>&1 \
+        | tee -a "${LANDSCAPE_STATE_DIR}/setup.log"
+    local -a status=("${PIPESTATUS[@]}")
+    if (( status[0] != 0 || status[1] != 0 )); then
+        log_warn "Landscape setup or writing setup.log failed."
+        return 1
     fi
-    while (( SECONDS < deadline )); do
-        status="$(landscape_lxc exec "local:${LANDSCAPE_VM}" -- systemctl is-active "$unit" 2>/dev/null)" || :
-        result="$(landscape_lxc exec "local:${LANDSCAPE_VM}" -- cat /root/landscape-setup.result 2>/dev/null)" || :
-        if landscape_lxc exec "local:${LANDSCAPE_VM}" -- \
-            tail -c "+$((offset + 1))" "$log" 2>/dev/null | cat > "$chunk"; then
-            cat "$chunk"
-            offset=$((offset + $(stat -c %s "$chunk")))
-        fi
-        if [[ -n "$result" ]]; then
-            if [[ "$result" == "0" ]]; then
-                return 0
-            fi
-            log_warn "Landscape setup failed (exit ${result}). See ${LANDSCAPE_STATE_DIR}/setup.log and ${log} inside the VM."
-            return 1
-        fi
-        if [[ "$status" == "failed" || "$status" == "inactive" || "$status" == "unknown" ]]; then
-            log_warn "Landscape setup stopped unexpectedly. Inspect journalctl -u ${unit} inside the VM."
-            return 1
-        fi
-        sleep 5
-    done
-    log_warn "Setup monitoring timed out; the guest job may still be running. Rerun menu 10 to reconnect."
-    return 1
-)
+}
 
 landscape_check_web() {
-    local ip="$1" _ code
+    local ip="$1" _ response
     for _ in {1..60}; do
-        code="$(curl -ksS --max-time 10 --output /dev/null --write-out '%{http_code}' \
-            --resolve "${FQDN}:443:${ip}" "https://${FQDN}/")" || code="unreachable"
-        [[ "$code" =~ ^(200|301|302|303)$ ]] && return 0
+        response="$(curl -ksS --noproxy "$ip" --connect-timeout 5 --max-time 10 \
+            --location --max-redirs 5 --output /dev/null --write-out '%{http_code} %{remote_ip}' \
+            "https://${ip}/")" || response="unreachable"
+        [[ "$response" == "200 ${ip}" ]] && return 0
         sleep 5
     done
-    log_warn "Landscape HTTPS did not become ready (last response: ${code})."
-    return 1
-}
-
-landscape_check_services() {
-    local _
-    for _ in {1..60}; do
-        if landscape_lxc exec "local:${LANDSCAPE_VM}" -- bash -c \
-            'for service; do systemctl is-active --quiet "$service" || exit 1; done' -- \
-            snap.landscape-task-handler.server.service snap.landscape-task-handler.worker.service \
-            snap.landscape-outbox.outbox.service; then
-            return 0
-        fi
-        sleep 5
-    done
-    log_warn "Required Landscape services are not active. Inspect Task Handler and Outbox with 'snap services' inside the VM."
+    log_warn "Landscape at https://${ip}/ did not become ready (last HTTP status and peer: ${response})."
     return 1
 }
 
@@ -209,7 +163,8 @@ landscape_instances() {
 }
 
 landscape_install() {
-    local ip i client status
+    local ip release client
+    local -a clients=()
     if [[ ! -f "$LANDSCAPE_SETTINGS" ]] && landscape_lxc info "local:${LANDSCAPE_VM}" >/dev/null 2>&1; then
         log_warn "The Landscape instance exists but saved settings are missing; refusing to replace its credentials."
         return 1
@@ -217,37 +172,33 @@ landscape_install() {
     landscape_prepare_settings || return 1
     # shellcheck source=/dev/null
     source "$LANDSCAPE_SETTINGS"
-    landscape_ensure_instance "$LANDSCAPE_VM" server || return 1
-    if ! landscape_lxc exec "local:${LANDSCAPE_VM}" -- test -f /var/lib/lab-landscape/ready; then
-        log_info "Using 16 GiB RAM during installation; the demo will run with 8 GiB afterwards."
-        landscape_set_memory 16GiB || return 1
-        status="$(landscape_lxc exec "local:${LANDSCAPE_VM}" -- systemctl is-active lab-landscape-setup 2>/dev/null)" || :
-        if [[ "$status" != "active" && "$status" != "activating" ]]; then
-            landscape_lxc file push "$LANDSCAPE_SETTINGS" "local:${LANDSCAPE_VM}/root/landscape.env" --mode 0600 || return 1
-            landscape_lxc file push "${SCRIPT_DIR}/scripts/landscape_guest.sh" \
-                "local:${LANDSCAPE_VM}/root/landscape-setup.sh" --mode 0700 || return 1
-        fi
-        if ! landscape_run_setup 2>&1 | tee -a "${LANDSCAPE_STATE_DIR}/setup.log"; then
-            log_warn "Fix the reported problem and rerun menu 10; existing resources are kept."
-            return 1
-        fi
+    landscape_ensure_instance "$LANDSCAPE_VM" server ubuntu:24.04 || return 1
+    # Clients boot while the server installs.
+    for release in "${LANDSCAPE_CLIENT_RELEASES[@]}"; do
+        client="${LANDSCAPE_CLIENT_PREFIX}-${release//./}"
+        landscape_ensure_instance "$client" client "ubuntu:${release}" || return 1
+        clients+=("$client")
+    done
+    if ! landscape_run_setup; then
+        log_warn "Fix the reported problem and rerun menu 10; existing resources are kept."
+        return 1
     fi
-    landscape_set_memory 8GiB || return 1
     ip="$(landscape_ip "$LANDSCAPE_VM")" || return 1
     landscape_check_web "$ip" || return 1
-    landscape_check_services || return 1
-    for i in $(seq 1 "$LANDSCAPE_CLIENT_COUNT"); do
-        client="${LANDSCAPE_CLIENT_PREFIX}-${i}"
+    for client in "${clients[@]}"; do
         log_info "Registering ${client}"
-        landscape_ensure_instance "$client" client || return 1
         landscape_setup_client "$ip" "$client" || return 1
     done
     log_success "Landscape 26.04 demo is ready."
     print_section "Landscape demo"
-    print_kv "URL" "https://${FQDN}/ (self-signed certificate)"
+    print_kv "URL" "https://${ip}/ (accept the private demo's self-signed certificate)"
     print_kv "Login" "${ADMIN_EMAIL} / ${ADMIN_PASSWORD}"
-    print_kv "Browser /etc/hosts" "${ip} ${FQDN}"
-    print_kv "Registered clients" "${LANDSCAPE_CLIENT_PREFIX}-1..${LANDSCAPE_CLIENT_COUNT}"
+    print_kv "Server IP" "$ip"
+    print_kv "Access" "Use the IP URL above; no hosts entry is needed. Remote browsers need the lab VPN/tunnel."
+    print_kv "Registered clients" "${clients[*]}"
+    if [[ -z "${LANDSCAPE_PRO_TOKEN:-}" ]]; then
+        print_kv "Ubuntu Pro" "no token supplied; existing attachments are kept. Unlicensed clients may lack inventory and management actions."
+    fi
 }
 
 landscape_destroy() {

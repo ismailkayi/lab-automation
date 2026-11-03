@@ -3,13 +3,15 @@ set -Eeuo pipefail
 
 export PATH="$PATH:/snap/bin"
 export DEBIAN_FRONTEND=noninteractive
+# needrestart could restart lxd-agent and end the host's exec session.
+export NEEDRESTART_SUSPEND=1
 # shellcheck source=/dev/null
 source /root/landscape.env
-exec >> /var/log/lab-landscape-setup.log 2>&1
 trap 'echo "ERROR at line ${LINENO}; fix the problem and rerun menu 10." >&2' ERR
 
 APT=(apt-get -y -q -o DPkg::Lock::Timeout=900
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+SERVICES=(landscape-task-handler.server landscape-task-handler.worker landscape-outbox.outbox)
 
 wait_web() {
     local _ code
@@ -24,22 +26,22 @@ wait_web() {
 
 wait_services() {
     local service _
-    for service in landscape-task-handler.server landscape-task-handler.worker landscape-outbox.outbox; do
+    for service in "${SERVICES[@]}"; do
         for _ in {1..60}; do
-            if systemctl is-active --quiet "snap.${service}.service"; then
-                break
-            fi
+            systemctl is-active --quiet "snap.${service}.service" && continue 2
             sleep 5
         done
-        systemctl is-active "snap.${service}.service"
+        echo "snap.${service}.service is not active" >&2
+        return 1
     done
 }
 
 psql_query() { runuser -u postgres -- psql -v ON_ERROR_STOP=1 -tAq "$@"; }
 
+# Task Handler and Outbox fail when they start before their databases after a reboot.
 configure_service_dependencies() {
     local service directory
-    for service in landscape-task-handler.server landscape-task-handler.worker landscape-outbox.outbox; do
+    for service in "${SERVICES[@]}"; do
         directory="/etc/systemd/system/snap.${service}.service.d"
         mkdir -p "$directory"
         cat > "$directory/99-landscape-demo.conf" <<EOF
@@ -61,6 +63,12 @@ EOF
         snap.landscape-task-handler.worker.service snap.landscape-outbox.outbox.service
 }
 
+# Older demo versions added a hostnamectl hook that blocks the agent at boot.
+if [[ -f /etc/systemd/system/lxd-agent.service.d/99-landscape-hostname.conf ]]; then
+    rm /etc/systemd/system/lxd-agent.service.d/99-landscape-hostname.conf
+    systemctl daemon-reload
+fi
+
 if [[ -f /var/lib/lab-landscape/ready ]]; then
     configure_service_dependencies
     wait_web
@@ -71,17 +79,13 @@ fi
 
 echo "==> Preparing Ubuntu 24.04 for Landscape 26.04 LTS"
 cloud-init status --wait
-mkdir -p /var/lib/lab-landscape /etc/cloud/cloud.cfg.d /etc/systemd/system/lxd-agent.service.d
+mkdir -p /var/lib/lab-landscape /etc/cloud/cloud.cfg.d
+# Quickstart builds its certificate from the FQDN.
 cat > /etc/cloud/cloud.cfg.d/99-landscape-demo.cfg <<EOF
 preserve_hostname: true
 manage_etc_hosts: false
 EOF
 hostnamectl set-hostname "$FQDN"
-cat > /etc/systemd/system/lxd-agent.service.d/99-landscape-hostname.conf <<EOF
-[Service]
-ExecStartPost=/usr/bin/hostnamectl set-hostname ${FQDN}
-EOF
-systemctl daemon-reload
 if ! grep -qF "127.0.1.1 ${FQDN}" /etc/hosts; then
     printf '127.0.1.1 %s\n' "$FQDN" >> /etc/hosts
 fi
@@ -143,7 +147,7 @@ wait_web
 if [[ ! -f /var/lib/lab-landscape/account-ready ]]; then
     /opt/canonical/landscape/bootstrap-account \
         --admin_email "$ADMIN_EMAIL" --admin_name "Landscape Instructor" \
-        --admin_password "$ADMIN_PASSWORD" --registration_key "$REGISTRATION_KEY" \
+        --admin_password="$ADMIN_PASSWORD" --registration_key="$REGISTRATION_KEY" \
         --system_email "noreply@landscape.internal" --root_url "https://${FQDN}/"
     touch /var/lib/lab-landscape/account-ready
 fi

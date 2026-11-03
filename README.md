@@ -241,12 +241,13 @@ TRAINING LABS - INFRASTRUCTURE ONLY
   6) Canonical K8s - Juju Training
   7) Cluster Manager
 
-INSTRUCTOR DEMOS
- 10) Landscape 26.04 (server + 3 registered clients)
-
 ENVIRONMENT MANAGEMENT
   8) Lab overview (nodes, uplink values, logins)
   9) Destroy Environments
+
+INSTRUCTOR DEMOS
+ 10) Landscape 26.04 (server + Ubuntu 26.04/24.04/22.04 clients)
+
   0) Exit
 ```
 
@@ -769,8 +770,8 @@ their browser, because login redirects to Keycloak. Route the service subnet
 through the same tunnel or VPN used for the labs. MicroCloud nodes on the same
 host reach the Connector through the host.
 
-**Destroy Cluster Manager service** deletes only the VM, the bridge and the
-stored credentials.
+**Destroy Cluster Manager service** (or **9) Destroy Environments > Cluster
+Manager**) deletes only the VM, the bridge and the stored credentials.
 
 ## Instructor Landscape Demo
 
@@ -780,24 +781,31 @@ Landscape demo**. Other instances such as `landscape-2604` are not touched.
 
 | Component | Instance | Resources |
 | --- | --- | --- |
-| Landscape 26.04 LTS Quickstart | `lab-landscape` (Ubuntu 24.04 VM) | 2 vCPU, 8 GiB RAM, 40 GiB disk |
-| 3 registered Ubuntu 24.04 clients | `lab-landscape-client-1..3` (system containers) | 1 vCPU, 512 MiB RAM, 8 GiB disk each |
+| Landscape 26.04 LTS Quickstart | `lab-landscape` (Ubuntu 24.04 VM) | 2 vCPU, 8 GiB RAM, 40 GiB disk, 4 GiB guest swap |
+| 3 registered clients: Ubuntu 26.04, 24.04 and 22.04 | `lab-landscape-client-2604`, `-2404`, `-2204` (system containers) | 1 vCPU, 512 MiB RAM, 8 GiB disk each |
 
 - Ubuntu 24.04 is the server OS because Quickstart does not support 26.04; the
   Landscape application is 26.04 from `ppa:landscape/self-hosted-26.04`.
-- The VM uses 16 GiB RAM during installation and restarts once with 8 GiB.
+- The clients start while the server is being installed and are registered at
+  the end.
 - Only the required Task Handler and Outbox services are added (no Debarchive).
-- Clients are accepted automatically. Without Ubuntu Pro they appear unlicensed
-  (inventory works; package and script management do not). For a full demo, run
-  `LANDSCAPE_PRO_TOKEN=<token> ./orchestrate.sh` and select 10.
+- Clients are accepted automatically. Without a Landscape entitlement they may
+  appear unlicensed, without inventory or management actions. For a full demo, run
+  `LANDSCAPE_PRO_TOKEN=<token> ./orchestrate.sh` and select 10; a free personal
+  Ubuntu Pro token (up to 5 machines) is enough for the 3 clients.
 - Rerunning option 10 resumes a failed installation and reuses existing instances.
 
-The end of the installation and **8) Lab overview** show the URL, login and the
-line `<server-IP> landscape.demo.internal` to add to `/etc/hosts` on the
-browser machine. Accept the self-signed certificate.
+Open the **`https://<server-IP>/` URL** printed at the end of installation or in
+**8) Lab overview**, and accept the private demo's self-signed certificate.
+The server's DHCP address is reserved so that this URL survives restarts.
+No browser-side hosts entry or sudo is needed; `landscape.demo.internal` is
+only used internally by the demo clients. Old browser bookmarks for that
+hostname may still point at an earlier deployment: use the displayed IP URL.
+The script checks that exact URL, including redirects, before reporting success.
+Browsers on other machines still need a route to the lab subnet via VPN/tunnel.
+The host's `/etc/hosts` file is not modified.
 
-State: `~/.local/state/lab-automation/landscape/` (`settings.env`, `setup.log`);
-guest log: `/var/log/lab-landscape-setup.log`.
+State: `~/.local/state/lab-automation/landscape/` (`settings.env`, `setup.log`).
 
 ## Lab Overview
 
@@ -858,7 +866,8 @@ To permanently remove a lab:
 
 1. run `./orchestrate.sh`;
 2. select **Destroy Environments**;
-3. select the workspace from the numbered list;
+3. select the workspace from the numbered list (the list also contains the
+   Cluster Manager service and the Landscape demo when they are installed);
 4. type `yes` exactly when prompted.
 
 ![Destroy confirmation](docs/images/confirm-destroy.png)

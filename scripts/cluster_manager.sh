@@ -8,7 +8,7 @@ CM_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/lab-automation/cluster-manag
 CM_SETTINGS="${CM_STATE_DIR}/settings.env"
 CM_GUEST_SCRIPT="${SCRIPT_DIR}/scripts/cluster_manager_guest.sh"
 
-cm_lxc() { lxc --project default "$@"; }
+cm_lxc() { lxc --project default "$@" </dev/null; }
 
 # Prints the first 172.31.X.0/24 prefix (e.g. 172.31.0) that does not overlap
 # host routes or LXD networks. 172.30.0.0/16 is used by MicroCloud uplinks.
@@ -40,7 +40,10 @@ else:
 PY
 }
 
-cm_random_password() { python3 -c 'import secrets; print(secrets.token_urlsafe(18))'; }
+# Letters and digits only: a leading "-" would be parsed as an option by kcadm.
+cm_random_password() {
+    python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(24)))'
+}
 
 # Creates the settings file on first use; afterwards only the participant count can grow.
 cm_prepare_settings() {
@@ -176,21 +179,53 @@ cm_show_access() {
     log_warn "HTTP Keycloak and simple passwords: use only on the private lab network/VPN."
 }
 
-cm_destroy() {
-    local answer
-    log_warn "This deletes ${CM_VM}, bridge ${CM_NETWORK} and the stored credentials."
-    log_warn "Participant labs are not touched, but their Cluster Manager registration stops working."
-    read -r -p "Type 'destroy' to continue: " answer
-    [[ "$answer" == "destroy" ]] || { echo "Cancelled."; return 0; }
+cm_installed() {
+    [[ -f "$CM_SETTINGS" ]] || cm_lxc info "local:${CM_VM}" >/dev/null 2>&1 \
+        || cm_lxc network show "local:${CM_NETWORK}" >/dev/null 2>&1
+}
+
+cm_remove() {
+    local vm_exists=false network_exists=false
+    if ! cm_lxc info local: >/dev/null 2>&1; then
+        log_warn "Local LXD is unavailable; Cluster Manager resources and credentials were not removed."
+        return 1
+    fi
     if cm_lxc info "local:${CM_VM}" >/dev/null 2>&1; then
-        cm_lxc delete --force "local:${CM_VM}" || return 1
+        vm_exists=true
+        if [[ "$(cm_lxc config get "local:${CM_VM}" user.lab-automation.component)" != "cluster-manager" ]]; then
+            log_warn "${CM_VM} is not owned by the Cluster Manager deployment; nothing was removed."
+            return 1
+        fi
     fi
     if cm_lxc network show "local:${CM_NETWORK}" >/dev/null 2>&1; then
+        network_exists=true
+        if [[ "$(cm_lxc network get "local:${CM_NETWORK}" user.lab-automation.component)" != "cluster-manager" ]]; then
+            log_warn "${CM_NETWORK} is not owned by the Cluster Manager deployment; nothing was removed."
+            return 1
+        fi
+    fi
+    if [[ "$vm_exists" == "true" ]]; then
+        cm_lxc delete --force "local:${CM_VM}" || return 1
+    fi
+    if [[ "$network_exists" == "true" ]]; then
         cm_lxc network delete "local:${CM_NETWORK}" || return 1
     fi
     rm -f -- "$CM_SETTINGS" "${CM_STATE_DIR}/participant-access.csv" \
-        "${CM_STATE_DIR}/instructor-access.txt" "${CM_STATE_DIR}/setup.log"
+        "${CM_STATE_DIR}/instructor-access.txt" "${CM_STATE_DIR}/setup.log" || return 1
     log_success "Cluster Manager service removed."
+}
+
+cm_destroy_warning() {
+    log_warn "This deletes ${CM_VM}, bridge ${CM_NETWORK} and the stored credentials."
+    log_warn "Participant labs are not touched, but their Cluster Manager registration stops working."
+}
+
+cm_destroy() {
+    local answer
+    cm_destroy_warning
+    read -r -p "Type 'destroy' to continue: " answer
+    [[ "$answer" == "destroy" ]] || { echo "Cancelled."; return 0; }
+    cm_remove
 }
 
 cluster_manager_menu() {
