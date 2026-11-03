@@ -3176,7 +3176,7 @@ destroy_menu() {
             | grep -v '^default$'
     )
     
-    local cm_index=0 landscape_index=0 landscape_instances_found=""
+    local cm_index=0 landscape_index=0 cos_index=0 landscape_instances_found=""
     if cm_installed; then
         envs+=("Cluster Manager (${CM_VM} + ${CM_NETWORK})")
         cm_index=${#envs[@]}
@@ -3185,6 +3185,10 @@ destroy_menu() {
     if [[ -n "$landscape_instances_found" || -f "$LANDSCAPE_SETTINGS" ]]; then
         envs+=("Landscape demo (${LANDSCAPE_VM} + clients)")
         landscape_index=${#envs[@]}
+    fi
+    if cos_installed; then
+        envs+=("COS Lite demo (${COS_VM} + ${COS_NETWORK})")
+        cos_index=${#envs[@]}
     fi
 
     if [ ${#envs[@]} -eq 0 ]; then
@@ -3225,6 +3229,13 @@ destroy_menu() {
         read -p "Type 'yes' to destroy the Landscape demo: " destroy_confirm
         [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; exit 0; }
         landscape_destroy || exit 1
+        exit 0
+    fi
+    if (( env_idx == cos_index )); then
+        log_warn "This deletes ${COS_VM} and ${COS_NETWORK}, and resets only unchanged host LXD settings recorded by this demo."
+        read -p "Type 'yes' to destroy the COS Lite demo: " destroy_confirm
+        [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; exit 0; }
+        cos_destroy || exit 1
         exit 0
     fi
     local env_prefix=""
@@ -3308,6 +3319,7 @@ echo "  8) Lab overview (nodes, uplink values, logins)"
 echo "  9) Destroy Environments"
 print_section "INSTRUCTOR DEMOS"
 echo " 10) Landscape 26.04 (server + Ubuntu 26.04/24.04/22.04 clients)"
+echo " 11) COS Lite (Grafana, Prometheus, Loki; monitors this host's LXD)"
 echo ""
 echo "  0) Exit"
 echo ""
@@ -3315,6 +3327,11 @@ read -p "Select action: " action
 
 if [[ "$action" == "10" ]]; then
     landscape_install
+    exit $?
+fi
+
+if [[ "$action" == "11" ]]; then
+    cos_install
     exit $?
 fi
 
@@ -3837,6 +3854,7 @@ fi
 
 source "${SCRIPT_DIR}/scripts/cluster_manager.sh"
 source "${SCRIPT_DIR}/scripts/landscape.sh"
+source "${SCRIPT_DIR}/scripts/cos.sh"
 source "${SCRIPT_DIR}/scripts/lab_overview.sh"
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

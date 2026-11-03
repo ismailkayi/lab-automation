@@ -1,6 +1,6 @@
 #!/bin/bash
-# Lab overview for the instructor: the Cluster Manager service and every lab (MicroCloud, K8s Snap,
-# K8s Juju) with nodes, state and addresses on screen, plus a CSV with the same data.
+# Lab overview for the instructor: the Cluster Manager service, the instructor demos and every lab
+# (MicroCloud, K8s Snap, K8s Juju) with nodes, state and addresses on screen, plus a CSV with the same data.
 # Sourced by orchestrate.sh (uses its helpers) or run directly: ./scripts/lab_overview.sh
 
 LAB_OVERVIEW_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/lab-automation/lab-overview"
@@ -82,6 +82,24 @@ lab_overview_landscape() {
     print_kv "  clients" "${clients:-0} container(s)"
 }
 
+lab_overview_cos() {
+    local state
+    state="$(cos_lxc list "local:${COS_VM}" -c s -f csv 2>/dev/null | head -n 1)"
+    if [[ -f "$COS_ACCESS" ]]; then
+        (
+            # shellcheck source=/dev/null
+            source "$COS_ACCESS"
+            print_kv "COS Lite demo" "http://${COS_IP}/cos-catalogue (VM: ${state:-missing})"
+            print_kv "  Grafana" "http://${COS_IP}/cos-grafana  admin / ${GRAFANA_PASSWORD}"
+            print_kv "  LXD dashboard" "http://${COS_IP}${DASHBOARD_PATH}"
+        )
+    elif [[ -n "$state" ]]; then
+        print_kv "COS Lite demo" "installation not finished (VM: ${state}); rerun menu 11"
+    else
+        print_kv "COS Lite demo" "not installed (menu 11)"
+    fi
+}
+
 lab_overview() {
     local labs=() entry="" lab="" workspace="" scenario="" mode="" kind=""
     local microcloud_labs=() partner="" i=0
@@ -113,6 +131,7 @@ lab_overview() {
     print_section "Lab overview"
     lab_overview_cluster_manager
     lab_overview_landscape || return 1
+    lab_overview_cos
     print_kv "Labs" "${#labs[@]}"
 
     for entry in "${labs[@]}"; do

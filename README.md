@@ -36,6 +36,7 @@ infrastructure-only training environment.
 - [Deploy Canonical Kubernetes (Juju)](#deploy-canonical-kubernetes-juju)
 - [Instructor Cluster Manager Service](#instructor-cluster-manager-service)
 - [Instructor Landscape Demo](#instructor-landscape-demo)
+- [Instructor COS Lite Demo](#instructor-cos-lite-demo)
 - [Lab Overview](#lab-overview)
 - [Manage Existing Labs](#manage-existing-labs)
 - [Access a Lab](#access-a-lab)
@@ -247,6 +248,7 @@ ENVIRONMENT MANAGEMENT
 
 INSTRUCTOR DEMOS
  10) Landscape 26.04 (server + Ubuntu 26.04/24.04/22.04 clients)
+ 11) COS Lite (Grafana, Prometheus, Loki; monitors this host's LXD)
 
   0) Exit
 ```
@@ -828,9 +830,60 @@ The host's `/etc/hosts` file is not modified.
 
 State: `~/.local/state/lab-automation/landscape/` (`settings.env`, `setup.log`).
 
+## Instructor COS Lite Demo
+
+Select **11) COS Lite** for a short instructor-led observability demo. It
+installs everything in one step; remove it with **9) Destroy Environments >
+COS Lite demo**.
+
+| Component | Instance | Resources |
+| --- | --- | --- |
+| Canonical Kubernetes, Juju 3.6 and COS Lite (Grafana, Prometheus, Loki, Alertmanager, Traefik, Catalogue) | `lab-cos` (Ubuntu 24.04 VM) on its own bridge `lab-cosbr0` | 4 vCPU, 12 GiB RAM, 60 GiB disk |
+
+- COS Lite is deployed with the official Terraform module
+  (`canonical/observability-stack`, `track/3.1`) through OpenTofu inside the VM.
+  The installation takes about 20-30 minutes.
+- COS monitors **this host's LXD**, so the demo shows real instances (the
+  training labs, Landscape, Cluster Manager) without extra agents:
+  - Prometheus scrapes the host's `/1.0/metrics` endpoint;
+  - LXD sends its lifecycle and log events to Loki;
+  - Grafana gets the official LXD dashboard (19131) with both data sources.
+- Option 11 changes these host LXD settings:
+  - `core.metrics_address=<COS bridge gateway>:8444` (bound to the COS bridge
+    address) and `core.metrics_authentication=false`;
+  - `loki.api.url` and `loki.instance`.
+
+  Both keys in each pair are checked before changing either one. If a key
+  already has a different value (including explicit metrics authentication or
+  a Loki instance label), option 11 stops and leaves that pair unchanged.
+  An existing metrics endpoint using default authentication is also protected,
+  even when LXD omits the default `true` value from its configuration.
+  Matching pre-existing values can be reused but are never claimed by the demo.
+  Each value written by the demo is recorded under `host-config/`. Destroy
+  unsets only recorded keys that still hold the exact value the demo wrote;
+  pre-existing or subsequently changed values are preserved. Keep the state
+  directory until destroy completes; without the ownership records, host
+  settings are left unchanged with a warning.
+
+  Metrics are unauthenticated for this isolated instructor demo. Binding to a
+  bridge address is not a firewall: any client with a route to that address may
+  reach it. Do not expose this subnet to untrusted networks.
+- Rerunning option 11 resumes a failed installation and reuses the VM.
+
+The summary at the end, and **8) Lab overview**, show the Catalogue, Grafana
+(login `admin` with the generated password) and LXD dashboard URLs, all under
+`http://<subnet>.200/`. Browsers on this host can open them directly; browsers
+on other machines need a route to the COS bridge subnet.
+
+Demo flow: open the LXD dashboard, start or stop an instance on the host, then
+show the change in the instance panels and in the Loki event panels.
+
+State: `~/.local/state/lab-automation/cos/` (`settings.env`, `access.env`,
+`setup.log`, `host-config/`).
+
 ## Lab Overview
 
-Menu option **8) Lab overview** shows Cluster Manager, the Landscape demo and every lab
+Menu option **8) Lab overview** shows Cluster Manager, the Landscape and COS Lite demos and every lab
 on the host (MicroCloud, Canonical K8s Snap and Juju, training and full). For
 each lab it prints the nodes with IP address and state. For MicroCloud labs it
 also prints:
@@ -888,7 +941,8 @@ To permanently remove a lab:
 1. run `./orchestrate.sh`;
 2. select **Destroy Environments**;
 3. select the workspace from the numbered list (the list also contains the
-   Cluster Manager service and the Landscape demo when they are installed);
+   Cluster Manager service and the Landscape and COS Lite demos when they are
+   installed);
 4. type `yes` exactly when prompted.
 
 ![Destroy confirmation](docs/images/confirm-destroy.png)
@@ -1102,6 +1156,8 @@ sharing logs.
 | `scripts/landscape.sh` | Instructor Landscape demo lifecycle |
 | `scripts/landscape_guest.sh` | Minimal Landscape 26.04 server installation |
 | `scripts/landscape_client.sh` | Single demo client registration |
+| `scripts/cos.sh` | Instructor COS Lite demo lifecycle and host LXD monitoring settings |
+| `scripts/cos_guest.sh` | Canonical Kubernetes, Juju and COS Lite installation inside the demo VM |
 | `scripts/lab_overview.sh` | Instructor lab overview |
 | `tests/` | Targeted regression tests |
 | `docs/images/` | Documentation screenshots |
