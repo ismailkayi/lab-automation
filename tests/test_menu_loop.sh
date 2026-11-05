@@ -100,6 +100,35 @@ run_main() {
     assert_contains "$menu" "0) Exit"
 )
 
+# The groups follow the lab overview: participant labs, management, then one section for the instructor
+# services. Cluster Manager is a service, so it must not sit under the infrastructure-only labs.
+(
+    menu="$(print_main_menu)"
+    assert_not_contains "$menu" "INSTRUCTOR DEMOS"
+    previous=-1
+    for heading in "FULL LAB DEPLOYMENTS" "TRAINING LABS - INFRASTRUCTURE ONLY" "ENVIRONMENT MANAGEMENT" "INSTRUCTOR SERVICES"; do
+        assert_contains "$menu" "$heading"
+        before="${menu%%"$heading"*}"
+        (( ${#before} > previous )) || fail "$heading must follow the previous group"
+        previous=${#before}
+    done
+    training="${menu#*"TRAINING LABS - INFRASTRUCTURE ONLY"}"
+    training="${training%%"ENVIRONMENT MANAGEMENT"*}"
+    for entry in "4) MicroCloud Training" "5) Canonical K8s - Snap Training" "6) Canonical K8s - Juju Training"; do
+        assert_contains "$training" "$entry"
+    done
+    assert_not_contains "$training" "Cluster Manager"
+    management="${menu#*"ENVIRONMENT MANAGEMENT"}"
+    management="${management%%"INSTRUCTOR SERVICES"*}"
+    for entry in "7) Lab overview" "8) Destroy Environments"; do
+        assert_contains "$management" "$entry"
+    done
+    services="${menu#*"INSTRUCTOR SERVICES"}"
+    for entry in "9) Cluster Manager" "10) Landscape" "11) COS Lite" "12) MAAS"; do
+        assert_contains "$services" "$entry"
+    done
+)
+
 # The menu comes back after every action and 0 leaves it.
 (
     mock_startup
@@ -209,7 +238,7 @@ run_main() {
     maas_install() { echo "called maas_install"; }
     run_main $'7\n8\n9\n10\n11\n12\n0'
     previous=-1
-    for name in cluster_manager_menu lab_overview destroy_menu landscape_install cos_install maas_install; do
+    for name in lab_overview destroy_menu cluster_manager_menu landscape_install cos_install maas_install; do
         assert_contains "$output" "called ${name}"
         before="${output%%"called ${name}"*}"
         (( ${#before} > previous )) || fail "$name must run in menu order"

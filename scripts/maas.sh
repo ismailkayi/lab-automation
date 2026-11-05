@@ -206,7 +206,7 @@ maas_print_access() {
 
 maas_install() {
     if [[ ! -f "$MAAS_SETTINGS" ]] && maas_lxc info "local:${MAAS_VM}" >/dev/null 2>&1; then
-        log_warn "${MAAS_VM} exists but its saved settings are missing; destroy it from menu 9 first."
+        log_warn "${MAAS_VM} exists but its saved settings are missing; destroy it from menu 8 first."
         return 1
     fi
     maas_validate_sizing || return 1

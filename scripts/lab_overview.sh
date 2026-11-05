@@ -73,14 +73,14 @@ lab_overview_cluster_manager() {
             lab_overview_field "Keycloak user" "lab-admin"
             lab_overview_field "Keycloak password" "$KEYCLOAK_ADMIN_PASSWORD"
             lab_overview_field "Accounts" "${accounts} participant accounts"
-            lab_overview_field "Participant logins" "menu 7 > Show access"
+            lab_overview_field "Participant logins" "menu 9 > Show access"
         )
     elif [[ -n "$vm_state" ]]; then
         lab_overview_field "VM state" "$vm_state"
         lab_overview_field "Setup" "installation not finished"
-        lab_overview_field "Next step" "menu 7 > Install / resume"
+        lab_overview_field "Next step" "menu 9 > Install / resume"
     else
-        lab_overview_field "Setup" "not installed (menu 7)"
+        lab_overview_field "Setup" "not installed (menu 9)"
     fi
 }
 

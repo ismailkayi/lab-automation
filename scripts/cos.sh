@@ -198,7 +198,7 @@ cos_print_access() {
 
 cos_install() {
     if [[ ! -f "$COS_SETTINGS" ]] && cos_lxc info "local:${COS_VM}" >/dev/null 2>&1; then
-        log_warn "${COS_VM} exists but its saved settings are missing; destroy it from menu 9 first."
+        log_warn "${COS_VM} exists but its saved settings are missing; destroy it from menu 8 first."
         return 1
     fi
     cos_prepare_settings || return 1

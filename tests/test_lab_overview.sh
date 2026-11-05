@@ -111,7 +111,7 @@ for text in "Instructor services" "Participant labs (5)" "Export" \
     "Password           InstructorTest123" \
     "Keycloak           http://172.31.0.210:8080/admin/" \
     "Keycloak user      lab-admin" "Keycloak password  KeycloakTest123" \
-    "Accounts           2 participant accounts" "Participant logins menu 7 > Show access" \
+    "Accounts           2 participant accounts" "Participant logins menu 9 > Show access" \
     "https://10.1.1.2/" "Password           LandscapeTest123" \
     "http://172.31.7.200/cos-grafana" "Password           GrafanaTest123" \
     "http://172.31.9.5:5240/MAAS" "Password           MaasTest123"; do
@@ -187,7 +187,7 @@ PY
     MAAS_ACCESS="$TMP/missing-maas.env"
     output="$(lab_overview)"
     for text in "Participant labs (0)" "No participant labs found." \
-        "not installed (menu 7)" "not installed (menu 10)" "not installed (menu 11)" \
+        "not installed (menu 9)" "not installed (menu 10)" "not installed (menu 11)" \
         "not installed (menu 12)"; do
         assert_contains "$output" "$text"
     done
@@ -201,7 +201,7 @@ PY
     output="$(lab_overview_cluster_manager)"
     assert_contains "$output" "VM state           STOPPED"
     assert_contains "$output" "installation not finished"
-    assert_contains "$output" "menu 7 > Install / resume"
+    assert_contains "$output" "menu 9 > Install / resume"
 )
 # Without the generated settings the logins are unknown, so the installation is offered again.
 (

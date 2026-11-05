@@ -241,19 +241,24 @@ TRAINING LABS - INFRASTRUCTURE ONLY
   4) MicroCloud Training
   5) Canonical K8s - Snap Training
   6) Canonical K8s - Juju Training
-  7) Cluster Manager
 
 ENVIRONMENT MANAGEMENT
-  8) Lab overview (nodes, uplink values, logins)
-  9) Destroy Environments
+  7) Lab overview (nodes, uplink values, logins)
+  8) Destroy Environments
 
-INSTRUCTOR DEMOS
+INSTRUCTOR SERVICES
+  9) Cluster Manager (central view of MicroClouds; participant accounts)
  10) Landscape 26.04 (server + Ubuntu 26.04/24.04/22.04 clients)
  11) COS Lite (Grafana, Prometheus, Loki; monitors this host's LXD)
  12) MAAS 3.8 (commission, deploy and release demo machines)
 
   0) Exit
 ```
+
+Options 1-6 create the participant labs. The instructor services (9-12) run in
+separate VMs on the lab host, are installed by the instructor and are removed
+with **8) Destroy Environments**; **7) Lab overview** lists them in a separate
+section from the participant labs.
 
 Type a number and press Enter. When an action finishes, or is cancelled, its
 output stays on screen until you press Enter; the menu then appears again, so
@@ -737,7 +742,7 @@ Juju model. Shrinking in place is not supported; use **Rebuild** instead.
 
 ## Instructor Cluster Manager Service
 
-Menu option **7) Cluster Manager** installs one shared MicroCloud Cluster
+Menu option **9) Cluster Manager** installs one shared MicroCloud Cluster
 Manager per lab host. Every participant gets a separate account, and all
 participants can see and manage every cluster registered on that host.
 Participants create their own join token in the UI.
@@ -781,13 +786,13 @@ their browser, because login redirects to Keycloak. Route the service subnet
 through the same tunnel or VPN used for the labs. MicroCloud nodes on the same
 host reach the Connector through the host.
 
-**Destroy Cluster Manager service** (or **9) Destroy Environments > Cluster
+**Destroy Cluster Manager service** (or **8) Destroy Environments > Cluster
 Manager**) deletes only the VM, the bridge and the stored credentials.
 
 ## Instructor Landscape Demo
 
 Select **10) Landscape 26.04** for a small instructor-led demonstration.
-It installs everything in one step; remove it with **9) Destroy Environments >
+It installs everything in one step; remove it with **8) Destroy Environments >
 Landscape demo**. Other instances such as `landscape-2604` are not touched.
 
 In the five-day MicroCloud training, show Landscape and COS on **Day 5**, after
@@ -832,7 +837,7 @@ to the same demo block.
   remove the machine at https://ubuntu.com/pro/dashboard.
 
 Open the **`https://<server-IP>/` URL** printed at the end of installation or in
-**8) Lab overview**, and accept the private demo's self-signed certificate.
+**7) Lab overview**, and accept the private demo's self-signed certificate.
 The server's DHCP address is reserved so that this URL survives restarts.
 No browser-side hosts entry or sudo is needed; `landscape.demo.internal` is
 only used internally by the demo clients. Landscape's root URL is also set to
@@ -848,7 +853,7 @@ State: `~/.local/state/lab-automation/landscape/` (`settings.env`, `setup.log`).
 ## Instructor COS Lite Demo
 
 Select **11) COS Lite** for a short instructor-led observability demo. It
-installs everything in one step; remove it with **9) Destroy Environments >
+installs everything in one step; remove it with **8) Destroy Environments >
 COS Lite demo**.
 
 | Component | Instance | Resources |
@@ -885,7 +890,7 @@ COS Lite demo**.
   reach it. Do not expose this subnet to untrusted networks.
 - Rerunning option 11 resumes a failed installation and reuses the VM.
 
-The summary at the end, and **8) Lab overview**, show the Catalogue, Grafana
+The summary at the end, and **7) Lab overview**, show the Catalogue, Grafana
 (login `admin` with the generated password) and LXD dashboard URLs, all under
 `http://<subnet>.200/`. Browsers on this host can open them directly; browsers
 on other machines need a route to the COS bridge subnet.
@@ -901,7 +906,7 @@ State: `~/.local/state/lab-automation/cos/` (`settings.env`, `access.env`,
 Select **12) MAAS 3.8** for a short instructor-led demonstration of the MAAS
 machine lifecycle: commission, deploy and release. Setup installs MAAS and
 leaves two commissioned machines **Ready**; you deploy and release them live.
-Remove the demo with **9) Destroy Environments > MAAS demo**.
+Remove the demo with **8) Destroy Environments > MAAS demo**.
 
 | Component | Instance | Resources |
 | --- | --- | --- |
@@ -938,7 +943,7 @@ Environment variables read when option 12 starts:
 | `MAAS_VM_CPU`, `MAAS_VM_MEMORY_GIB`, `MAAS_VM_DISK_GIB` | `6`, `10`, `100` | Size of the VM, applied when it is created |
 | `MAAS_TARGET_COUNT` | `2` | Number of demo machines. Raising it on a rerun adds machines |
 
-The summary at the end, and **8) Lab overview**, show the web UI address and
+The summary at the end, and **7) Lab overview**, show the web UI address and
 the `admin` login with its generated password. The web UI uses plain HTTP;
 browsers on this host can open it directly, and browsers on other machines need
 a route to the `lab-maasbr0` subnet. For the CLI, run
@@ -971,7 +976,7 @@ State: `~/.local/state/lab-automation/maas/` (`settings.env`, `access.env`,
 
 ## Lab Overview
 
-Menu option **8) Lab overview** separates instructor services, participant labs
+Menu option **7) Lab overview** separates instructor services, participant labs
 and the CSV export into clearly labelled sections. Each service has its own
 block with state, URLs and access details on separate lines. Each lab on the
 host (MicroCloud, Canonical K8s Snap and Juju, training and full) has a heading
@@ -991,7 +996,7 @@ uses plain text and preserves complete URLs and addresses when redirected.
 
 The Cluster Manager section shows the address, the state of its VM, the
 instructor and Keycloak administrator logins and the number of participant
-accounts; the participant logins are in menu 7, **Show access**. Because the
+accounts; the participant logins are in menu 9, **Show access**. Because the
 service blocks include instructor passwords, do not share the output with
 participants.
 
