@@ -12,13 +12,15 @@ cm_lxc() { lxc --project default "$@" </dev/null; }
 
 # Prints the first 172.31.X.0/24 prefix (e.g. 172.31.0) that does not overlap
 # host routes or LXD networks. 172.30.0.0/16 is used by MicroCloud uplinks.
+# Extra arguments are CIDRs that must be avoided as well, for subnets that are
+# chosen together but not created yet.
 cm_pick_subnet_prefix() {
     local routes networks
     routes="$(ip -j -4 route show table all)" || return 1
     networks="$(lxc network list local: --all-projects --format json)" || return 1
-    python3 - "$routes" "$networks" <<'PY'
+    python3 - "$routes" "$networks" "$@" <<'PY'
 import ipaddress, json, sys
-used = []
+used = [ipaddress.ip_network(extra, strict=False) for extra in sys.argv[3:]]
 for route in json.loads(sys.argv[1]):
     if route.get("dst", "default") != "default":
         used.append(ipaddress.ip_network(route["dst"], strict=False))

@@ -517,8 +517,10 @@ seed_owned_records() {
     cos_lxc() { echo "RUNNING"; }
     printf 'COS_IP=172.31.7.200\nGRAFANA_PASSWORD=Secret123\nLXD_JOB=lxd\nDASHBOARD_PATH=/cos-grafana/d/lxd/lxd\n' > "$COS_ACCESS"
     output="$(lab_overview_cos)"
-    assert_contains "$output" "http://172.31.7.200/cos-catalogue (VM: RUNNING)"
-    assert_contains "$output" "admin / Secret123"
+    assert_contains "$output" "http://172.31.7.200/cos-catalogue"
+    assert_contains "$output" "VM state           RUNNING"
+    assert_contains "$output" "Username           admin"
+    assert_contains "$output" "Password           Secret123"
     assert_contains "$output" "http://172.31.7.200/cos-grafana/d/lxd/lxd"
     rm -f "$COS_ACCESS"
     output="$(lab_overview_cos)"
@@ -548,7 +550,7 @@ sed -n '/^lab_overview() {/,/^}/p' "${REPO_ROOT}/scripts/lab_overview.sh" | grep
     output="$(destroy_menu <<< $'1\nno' 2>&1)" || fail "Cancelling must not fail"
     [[ ! -s "$TMP/calls" ]] || fail "Only 'yes' may destroy the COS demo"
 )
-grep -q '^echo " 11) COS Lite' "${REPO_ROOT}/orchestrate.sh" || fail "Menu option 11 must install COS Lite"
+grep -q '^[[:space:]]*echo " 11) COS Lite' "${REPO_ROOT}/orchestrate.sh" || fail "Menu option 11 must install COS Lite"
 grep -A2 'action" == "11"' "${REPO_ROOT}/orchestrate.sh" | grep -q cos_install || fail "Option 11 must call cos_install"
 
 # Guest script: pinned COS Lite track, LXD scrape job and dashboard import.

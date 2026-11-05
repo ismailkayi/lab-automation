@@ -37,6 +37,7 @@ infrastructure-only training environment.
 - [Instructor Cluster Manager Service](#instructor-cluster-manager-service)
 - [Instructor Landscape Demo](#instructor-landscape-demo)
 - [Instructor COS Lite Demo](#instructor-cos-lite-demo)
+- [Instructor MAAS Demo](#instructor-maas-demo)
 - [Lab Overview](#lab-overview)
 - [Manage Existing Labs](#manage-existing-labs)
 - [Access a Lab](#access-a-lab)
@@ -249,9 +250,17 @@ ENVIRONMENT MANAGEMENT
 INSTRUCTOR DEMOS
  10) Landscape 26.04 (server + Ubuntu 26.04/24.04/22.04 clients)
  11) COS Lite (Grafana, Prometheus, Loki; monitors this host's LXD)
+ 12) MAAS 3.8 (commission, deploy and release demo machines)
 
   0) Exit
 ```
+
+Type a number and press Enter. When an action finishes, or is cancelled, its
+output stays on screen until you press Enter; the menu then appears again, so
+one session can run several actions in a row. Choose `0` or press Ctrl-D to
+exit. An invalid entry asks again, and a failed action shows its exit status
+before the prompt. Ctrl-C ends the script immediately. When the input is piped
+instead of typed, there is no pause and the menu follows at once.
 
 For a first deployment:
 
@@ -784,8 +793,8 @@ Landscape demo**. Other instances such as `landscape-2604` are not touched.
 In the five-day MicroCloud training, show Landscape and COS on **Day 5**, after
 the lab review and before Production Q&A. Use a separate instructor host;
 participants do not install these services or get extra lab tasks or quiz
-questions. MAAS is planned for the same demo block, but its automation is not
-implemented yet.
+questions. The MAAS demo ([Instructor MAAS Demo](#instructor-maas-demo)) belongs
+to the same demo block.
 
 | Component | Instance | Resources |
 | --- | --- | --- |
@@ -887,12 +896,87 @@ show the change in the instance panels and in the Loki event panels.
 State: `~/.local/state/lab-automation/cos/` (`settings.env`, `access.env`,
 `setup.log`, `host-config/`).
 
+## Instructor MAAS Demo
+
+Select **12) MAAS 3.8** for a short instructor-led demonstration of the MAAS
+machine lifecycle: commission, deploy and release. Setup installs MAAS and
+leaves two commissioned machines **Ready**; you deploy and release them live.
+Remove the demo with **9) Destroy Environments > MAAS demo**.
+
+| Component | Instance | Resources |
+| --- | --- | --- |
+| MAAS 3.8 (region and rack controller), PostgreSQL 16 and an LXD host that provides the demo machines | `lab-maas` (Ubuntu 24.04 VM) on its own bridge `lab-maasbr0` | 6 vCPU, 10 GiB RAM, 100 GiB disk |
+
+- No bare-metal hardware is needed. Inside `lab-maas`, LXD supplies virtual
+  machines on a private bridge (`maas-pxe`); MAAS provides DHCP and DNS and
+  PXE-boots them like physical servers. This machine network exists only inside
+  the VM, and its subnet is reserved so that other services never choose it.
+- The host must offer nested KVM (`/dev/kvm` with nested virtualization
+  enabled) and at least the VM memory plus 1 GiB of available memory; option 12
+  checks both before it creates the VM.
+- MAAS is installed from the `3.8/candidate` snap channel. Set `MAAS_CHANNEL`
+  (for example `3.8/stable`) before starting to use another channel.
+- Setup creates two machines, `maas-demo-01` and `maas-demo-02` (2 vCPU, 2 GiB
+  RAM and 20 GB disk each), commissions them and tags them `demo`. Both stay
+  **Ready**, so nothing is deployed until you do it live. Setup also uploads an
+  SSH key to MAAS, so every machine you deploy can be reached from the
+  instructor shell.
+- The installation downloads snaps and Ubuntu boot images, so its duration
+  depends mostly on the connection: about 10 to 15 minutes on a fast one.
+  Rerunning option 12 resumes a failed installation and reuses the VM. A rerun
+  never touches a machine you have allocated, deployed or released; it only
+  creates missing machines and waits for machines that are still being
+  commissioned.
+
+Environment variables read when option 12 starts:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MAAS_CHANNEL` | `3.8/candidate` | MAAS snap channel |
+| `MAAS_LXD_CHANNEL` | `5.21/stable` | LXD snap channel inside the VM |
+| `MAAS_VM_IMAGE` | `ubuntu:24.04` | Image of the `lab-maas` VM |
+| `MAAS_VM_CPU`, `MAAS_VM_MEMORY_GIB`, `MAAS_VM_DISK_GIB` | `6`, `10`, `100` | Size of the VM, applied when it is created |
+| `MAAS_TARGET_COUNT` | `2` | Number of demo machines. Raising it on a rerun adds machines |
+
+The summary at the end, and **8) Lab overview**, show the web UI address and
+the `admin` login with its generated password. The web UI uses plain HTTP;
+browsers on this host can open it directly, and browsers on other machines need
+a route to the `lab-maasbr0` subnet. For the CLI, run
+`lxc exec lab-maas -- bash`; the profile `admin` is already logged in.
+
+Demo flow:
+
+1. Open the web UI and show the **Machines** list: both demo machines are
+   **Ready** and tagged `demo`. Show the VM host, the machine network with DHCP
+   enabled and the synced Ubuntu images.
+2. Select `maas-demo-01` and use **Take action > Deploy** with Ubuntu 24.04 LTS.
+   A deployment takes several minutes, so start it first and continue with the
+   next points while it runs. Deploy `maas-demo-02` too if you want to show two
+   machines at once.
+3. When the machine is **Deployed**, log in from the instructor shell with
+   `lxc exec lab-maas -- ssh ubuntu@<machine IP>` (accept the host key; the SSH
+   key is already uploaded to MAAS).
+4. **Release** the machines to return them to Ready.
+
+The same lifecycle from the instructor shell (`lxc exec lab-maas -- bash`):
+
+```bash
+maas admin machines read | jq -r '.[] | "\(.hostname) \(.system_id) \(.status_name)"'
+maas admin machine deploy <system_id> distro_series=noble
+maas admin machine release <system_id>
+```
+
+State: `~/.local/state/lab-automation/maas/` (`settings.env`, `access.env`,
+`setup.log`).
+
 ## Lab Overview
 
-Menu option **8) Lab overview** shows Cluster Manager, the Landscape and COS Lite demos and every lab
-on the host (MicroCloud, Canonical K8s Snap and Juju, training and full). For
-each lab it prints the nodes with IP address and state. For MicroCloud labs it
-also prints:
+Menu option **8) Lab overview** separates instructor services, participant labs
+and the CSV export into clearly labelled sections. Each service has its own
+block with state, URLs and access details on separate lines. Each lab on the
+host (MicroCloud, Canonical K8s Snap and Juju, training and full) has a heading
+and a node table with **NODE**, **STATE** and **MANAGEMENT IP** columns.
+For MicroCloud labs it also prints:
 
 - the OVN uplink values to enter in `microcloud init` (gateway, address range,
   DNS);
@@ -901,8 +985,15 @@ also prints:
 - the DR partner (consecutive training labs form a pair: `01` with `02`, `03`
   with `04`; a last odd lab is paired with the instructor).
 
-The Cluster Manager section shows the address, the state of its VM and the
-number of participant accounts; logins are in menu 7, **Show access**.
+OVN setup values and post-init forward routes appear in separate blocks, so
+they can be copied without picking values out of a long sentence. The output
+uses plain text and preserves complete URLs and addresses when redirected.
+
+The Cluster Manager section shows the address, the state of its VM, the
+instructor and Keycloak administrator logins and the number of participant
+accounts; the participant logins are in menu 7, **Show access**. Because the
+service blocks include instructor passwords, do not share the output with
+participants.
 
 The lab rows (excluding instructor services) are also written to a CSV:
 
@@ -947,11 +1038,15 @@ To permanently remove a lab:
 1. run `./orchestrate.sh`;
 2. select **Destroy Environments**;
 3. select the workspace from the numbered list (the list also contains the
-   Cluster Manager service and the Landscape and COS Lite demos when they are
-   installed);
+   Cluster Manager service and the Landscape, COS Lite and MAAS demos when they
+   are installed), or `0` to go back to the main menu;
 4. type `yes` exactly when prompted.
 
 ![Destroy confirmation](docs/images/confirm-destroy.png)
+
+After a destroy, the list is shown again with the remaining environments, so
+several of them can be removed in one visit. Any answer other than `yes`
+cancels that removal.
 
 The orchestrator destroys tracked resources, removes safe owned MicroCloud
 network remnants, deletes the OpenTofu workspace, and removes its generated
@@ -1164,6 +1259,8 @@ sharing logs.
 | `scripts/landscape_client.sh` | Single demo client registration |
 | `scripts/cos.sh` | Instructor COS Lite demo lifecycle and host LXD monitoring settings |
 | `scripts/cos_guest.sh` | Canonical Kubernetes, Juju and COS Lite installation inside the demo VM |
+| `scripts/maas.sh` | Instructor MAAS demo lifecycle |
+| `scripts/maas_guest.sh` | MAAS, the LXD machine host and machine commissioning inside the demo VM |
 | `scripts/lab_overview.sh` | Instructor lab overview |
 | `tests/` | Targeted regression tests |
 | `docs/images/` | Documentation screenshots |

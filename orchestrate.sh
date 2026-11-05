@@ -918,10 +918,6 @@ detect_lxd_defaults() {
 
     export TF_VAR_lxd_network_name="$LXD_NETWORK_NAME"
     export TF_VAR_lxd_storage_pool="$LXD_STORAGE_POOL"
-
-    print_section "LXD Environment"
-    print_kv "Selected network" "${LXD_NETWORK_NAME}"
-    print_kv "Selected storage pool" "${LXD_STORAGE_POOL}"
 }
 
 cidr_host_address() {
@@ -3167,163 +3163,232 @@ run_batch_deployments() {
 }
 
 destroy_menu() {
-    # Get active workspaces (ignoring default)
-    mapfile -t envs < <(
-        tofu workspace list \
-            | sed 's/^\*\s*//' \
-            | sed 's/^\s*//' \
-            | awk 'NF' \
-            | grep -v '^default$'
-    )
+    local envs=() i="" env_idx="" selected_env="" destroy_confirm=""
+    local cm_index=0 landscape_index=0 cos_index=0 maas_index=0 landscape_instances_found=""
+    local env_prefix="" env_scenario="" env_deployment_mode="" current_microcloud_node_count=3
+
+    # The list is shown again after every destroy; 0 returns to the main menu.
+    while true; do
+        # Get active workspaces (ignoring default)
+        mapfile -t envs < <(
+            tofu workspace list \
+                | sed 's/^\*\s*//' \
+                | sed 's/^\s*//' \
+                | awk 'NF' \
+                | grep -v '^default$'
+        )
     
-    local cm_index=0 landscape_index=0 cos_index=0 landscape_instances_found=""
-    if cm_installed; then
-        envs+=("Cluster Manager (${CM_VM} + ${CM_NETWORK})")
-        cm_index=${#envs[@]}
-    fi
-    landscape_instances_found="$(landscape_instances 2>/dev/null)" || landscape_instances_found=""
-    if [[ -n "$landscape_instances_found" || -f "$LANDSCAPE_SETTINGS" ]]; then
-        envs+=("Landscape demo (${LANDSCAPE_VM} + clients)")
-        landscape_index=${#envs[@]}
-    fi
-    if cos_installed; then
-        envs+=("COS Lite demo (${COS_VM} + ${COS_NETWORK})")
-        cos_index=${#envs[@]}
-    fi
-
-    if [ ${#envs[@]} -eq 0 ]; then
-        echo -e "${YELLOW}No active lab environments (workspaces) found to delete.${NC}"
-        exit 0
-    fi
-
-    echo ""
-    echo -e "${RED}--- ACTIVE ENVIRONMENTS ---${NC}"
-    for i in "${!envs[@]}"; do
-        echo "$((i+1))) ${envs[$i]}"
-    done
-    echo "0) Cancel and Exit"
-    echo ""
-    
-    echo ""
-    read -p "Select the environment number to destroy: " env_idx
-    
-    if [[ "$env_idx" == "0" || -z "$env_idx" ]]; then
-        echo "Cancelled."
-        exit 0
-    fi
-
-    if ! [[ "$env_idx" =~ ^[0-9]+$ ]] || (( env_idx < 1 || env_idx > ${#envs[@]} )); then
-        echo "Invalid selection."
-        exit 1
-    fi
-
-    selected_env=${envs[$((env_idx-1))]}
-    if (( env_idx == cm_index )); then
-        cm_destroy_warning
-        read -p "Type 'yes' to destroy the Cluster Manager service: " destroy_confirm
-        [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; exit 0; }
-        cm_remove || exit 1
-        exit 0
-    fi
-    if (( env_idx == landscape_index )); then
-        read -p "Type 'yes' to destroy the Landscape demo: " destroy_confirm
-        [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; exit 0; }
-        landscape_destroy || exit 1
-        exit 0
-    fi
-    if (( env_idx == cos_index )); then
-        log_warn "This deletes ${COS_VM} and ${COS_NETWORK}, and resets only unchanged host LXD settings recorded by this demo."
-        read -p "Type 'yes' to destroy the COS Lite demo: " destroy_confirm
-        [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; exit 0; }
-        cos_destroy || exit 1
-        exit 0
-    fi
-    local env_prefix=""
-    local env_scenario=""
-    local env_deployment_mode=""
-    local current_microcloud_node_count="3"
-
-    if ! read -r env_prefix env_scenario env_deployment_mode < <(parse_workspace_metadata "$selected_env"); then
-        log_warn "Workspace name is not recognized as a managed lab: ${selected_env}"
-        exit 1
-    fi
-
-    log_warn "Selected environment for destruction: ${selected_env}"
-    echo ""
-    read -p "Type 'yes' to destroy ${selected_env}: " destroy_confirm
-
-    if [[ "$destroy_confirm" != "yes" ]]; then
-        echo "Cancelled."
-        exit 0
-    fi
-
-    if [[ "$env_scenario" == "k8s-snap" ]]; then
-        read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_topology_from_state "$selected_env")
-    else
-        current_k8s_cp_count=3
-        current_k8s_worker_count=1
-    fi
-
-    if [[ "$env_scenario" == "k8s-juju" ]]; then
-        read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_juju_topology_from_state "$selected_env")
-    fi
-
-    if [[ "$env_scenario" == "microcloud" ]]; then
-        current_microcloud_node_count=$(get_microcloud_node_count_from_state "$selected_env")
-        if (( current_microcloud_node_count < 3 )); then
-            current_microcloud_node_count=3
+        cm_index=0 landscape_index=0 cos_index=0 maas_index=0 landscape_instances_found=""
+        if cm_installed; then
+            envs+=("Cluster Manager (${CM_VM} + ${CM_NETWORK})")
+            cm_index=${#envs[@]}
         fi
-    fi
+        landscape_instances_found="$(landscape_instances 2>/dev/null)" || landscape_instances_found=""
+        if [[ -n "$landscape_instances_found" || -f "$LANDSCAPE_SETTINGS" ]]; then
+            envs+=("Landscape demo (${LANDSCAPE_VM} + clients)")
+            landscape_index=${#envs[@]}
+        fi
+        if cos_installed; then
+            envs+=("COS Lite demo (${COS_VM} + ${COS_NETWORK})")
+            cos_index=${#envs[@]}
+        fi
+        if maas_installed; then
+            envs+=("MAAS demo (${MAAS_VM} + ${MAAS_NETWORK})")
+            maas_index=${#envs[@]}
+        fi
 
-    log_warn "Destroying environment: ${selected_env}..."
-    destroy_environment \
-        "$selected_env" "$env_prefix" "$env_scenario" \
-        "$current_k8s_cp_count" "$current_k8s_worker_count" \
-        "$env_deployment_mode" "$current_microcloud_node_count"
+        if [ ${#envs[@]} -eq 0 ]; then
+            echo -e "${YELLOW}No active lab environments (workspaces) found to delete.${NC}"
+            return 0
+        fi
+
+        echo ""
+        echo -e "${RED}--- ACTIVE ENVIRONMENTS ---${NC}"
+        for i in "${!envs[@]}"; do
+            echo "$((i+1))) ${envs[$i]}"
+        done
+        echo "0) Back to the main menu"
+        echo ""
     
-    log_success "Environment ${selected_env} successfully destroyed and cleaned up!"
+        echo ""
+        read -r -p "Select the environment number to destroy: " env_idx || { echo ""; return 0; }
+    
+        if [[ "$env_idx" == "0" || -z "$env_idx" ]]; then
+            echo "Cancelled."
+            return 0
+        fi
+
+        if ! [[ "$env_idx" =~ ^[0-9]+$ ]] || (( env_idx < 1 || env_idx > ${#envs[@]} )); then
+            echo "Invalid selection."
+            continue
+        fi
+
+        selected_env=${envs[$((env_idx-1))]}
+        if (( env_idx == cm_index )); then
+            cm_destroy_warning
+            read -r -p "Type 'yes' to destroy the Cluster Manager service: " destroy_confirm || destroy_confirm=""
+            [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; continue; }
+            cm_remove || return 1
+            continue
+        fi
+        if (( env_idx == landscape_index )); then
+            read -r -p "Type 'yes' to destroy the Landscape demo: " destroy_confirm || destroy_confirm=""
+            [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; continue; }
+            landscape_destroy || return 1
+            continue
+        fi
+        if (( env_idx == cos_index )); then
+            log_warn "This deletes ${COS_VM} and ${COS_NETWORK}, and resets only unchanged host LXD settings recorded by this demo."
+            read -r -p "Type 'yes' to destroy the COS Lite demo: " destroy_confirm || destroy_confirm=""
+            [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; continue; }
+            cos_destroy || return 1
+            continue
+        fi
+        if (( env_idx == maas_index )); then
+            log_warn "This deletes ${MAAS_VM} and ${MAAS_NETWORK}; the demo machines inside the VM are deleted with it."
+            read -r -p "Type 'yes' to destroy the MAAS demo: " destroy_confirm || destroy_confirm=""
+            [[ "$destroy_confirm" == "yes" ]] || { echo "Cancelled."; continue; }
+            maas_destroy || return 1
+            continue
+        fi
+        current_microcloud_node_count=3
+
+        if ! read -r env_prefix env_scenario env_deployment_mode < <(parse_workspace_metadata "$selected_env"); then
+            log_warn "Workspace name is not recognized as a managed lab: ${selected_env}"
+            return 1
+        fi
+
+        log_warn "Selected environment for destruction: ${selected_env}"
+        echo ""
+        read -r -p "Type 'yes' to destroy ${selected_env}: " destroy_confirm || destroy_confirm=""
+
+        if [[ "$destroy_confirm" != "yes" ]]; then
+            echo "Cancelled."
+            continue
+        fi
+
+        if [[ "$env_scenario" == "k8s-snap" ]]; then
+            read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_topology_from_state "$selected_env")
+        else
+            current_k8s_cp_count=3
+            current_k8s_worker_count=1
+        fi
+
+        if [[ "$env_scenario" == "k8s-juju" ]]; then
+            read -r current_k8s_cp_count current_k8s_worker_count < <(get_k8s_juju_topology_from_state "$selected_env")
+        fi
+
+        if [[ "$env_scenario" == "microcloud" ]]; then
+            current_microcloud_node_count=$(get_microcloud_node_count_from_state "$selected_env")
+            if (( current_microcloud_node_count < 3 )); then
+                current_microcloud_node_count=3
+            fi
+        fi
+
+        log_warn "Destroying environment: ${selected_env}..."
+        destroy_environment \
+            "$selected_env" "$env_prefix" "$env_scenario" \
+            "$current_k8s_cp_count" "$current_k8s_worker_count" \
+            "$env_deployment_mode" "$current_microcloud_node_count"
+    
+        log_success "Environment ${selected_env} successfully destroyed and cleaned up!"
+    done
 }
 
-main() {
-    if (( EUID == 0 )); then
-        log_warn "Do not run orchestrate.sh as root or with sudo."
-        log_warn "Run ./prep_host.sh as your regular user, refresh lxd group membership if prompted, then run ./orchestrate.sh."
+MAIN_MENU_LAST_OPTION=12
+
+print_banner() {
+    echo -e "${CYAN}==========================================================${NC}"
+    echo -e "${CYAN}         CANONICAL LAB DEPLOYMENT ENGINE                  ${NC}"
+    echo -e "${CYAN}==========================================================${NC}"
+}
+
+clear_screen() {
+    if [[ -t 1 ]]; then
+        clear -x 2>/dev/null || clear 2>/dev/null || true
+    fi
+}
+
+stdin_is_tty() {
+    [[ -t 0 ]]
+}
+
+# Drops keystrokes typed while an action was running, so a stray Enter cannot skip the pause.
+discard_pending_input() {
+    local _
+    while read -r -t 0; do
+        read -r -t 0.1 _ || break
+    done
+}
+
+# Keeps the output of an action on screen until the user asks for the menu, which would
+# otherwise push it out of the window. Only an interactive session waits; piped input is
+# left for the menu prompt. Returns 1 when the input ends.
+pause_before_menu() {
+    local _
+
+    echo ""
+    stdin_is_tty || return 0
+    discard_pending_input
+    printf 'Press Enter to return to the main menu...' >&2
+    read -r _ || return 1
+    clear_screen
+}
+
+# The OpenTofu output is only shown when the initialization fails.
+init_opentofu() {
+    local init_output=""
+
+    if [[ ! -d "${SCRIPT_DIR}/.terraform/providers" ]]; then
+        log_info "Downloading the OpenTofu providers (first run only)..."
+    fi
+    if ! init_output="$(tofu init -input=false 2>&1)"; then
+        echo "$init_output"
+        log_warn "OpenTofu initialization failed. Script cannot continue."
+        log_warn "Please fix the error above and rerun ./orchestrate.sh."
         exit 1
     fi
+}
 
-    cd "$SCRIPT_DIR"
-    clear
-echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}         CANONICAL LAB DEPLOYMENT ENGINE                  ${NC}"
-echo -e "${CYAN}==========================================================${NC}"
+print_main_menu() {
+    print_section "FULL LAB DEPLOYMENTS"
+    echo "  1) MicroCloud (automated deployment)"
+    echo "  2) Canonical K8s - Snap (automated deployment)"
+    echo "  3) Canonical K8s - Juju (automated deployment)"
+    print_section "TRAINING LABS - INFRASTRUCTURE ONLY"
+    echo "  4) MicroCloud Training"
+    echo "  5) Canonical K8s - Snap Training"
+    echo "  6) Canonical K8s - Juju Training"
+    echo "  7) Cluster Manager"
+    print_section "ENVIRONMENT MANAGEMENT"
+    echo "  8) Lab overview (nodes, uplink values, logins)"
+    echo "  9) Destroy Environments"
+    print_section "INSTRUCTOR DEMOS"
+    echo " 10) Landscape 26.04 (server + Ubuntu 26.04/24.04/22.04 clients)"
+    echo " 11) COS Lite (Grafana, Prometheus, Loki; monitors this host's LXD)"
+    echo " 12) MAAS ${MAAS_CHANNEL%%/*} (commission, deploy and release demo machines)"
+    echo ""
+    echo "  0) Exit"
+    echo ""
+}
 
-ensure_tools
-detect_lxd_defaults
-if ! tofu init -input=false; then
-    log_warn "OpenTofu initialization failed. Script cannot continue."
-    log_warn "Please fix the error above and rerun ./orchestrate.sh."
-    exit 1
-fi
+# Prompts until a valid menu number is entered and stores it in MENU_CHOICE.
+# Returns 1 when the input ends.
+read_menu_choice() {
+    local reply=""
 
-print_section "FULL LAB DEPLOYMENTS"
-echo "  1) MicroCloud (automated deployment)"
-echo "  2) Canonical K8s - Snap (automated deployment)"
-echo "  3) Canonical K8s - Juju (automated deployment)"
-print_section "TRAINING LABS - INFRASTRUCTURE ONLY"
-echo "  4) MicroCloud Training"
-echo "  5) Canonical K8s - Snap Training"
-echo "  6) Canonical K8s - Juju Training"
-echo "  7) Cluster Manager"
-print_section "ENVIRONMENT MANAGEMENT"
-echo "  8) Lab overview (nodes, uplink values, logins)"
-echo "  9) Destroy Environments"
-print_section "INSTRUCTOR DEMOS"
-echo " 10) Landscape 26.04 (server + Ubuntu 26.04/24.04/22.04 clients)"
-echo " 11) COS Lite (Grafana, Prometheus, Loki; monitors this host's LXD)"
-echo ""
-echo "  0) Exit"
-echo ""
-read -p "Select action: " action
+    while true; do
+        read -r -p "Select action: " reply || return 1
+        if [[ "$reply" =~ ^[0-9]{1,2}$ ]] && (( 10#$reply <= MAIN_MENU_LAST_OPTION )); then
+            MENU_CHOICE=$((10#$reply))
+            return 0
+        fi
+        [[ -z "$reply" ]] || echo "Invalid selection. Enter a number from 0 to ${MAIN_MENU_LAST_OPTION}."
+    done
+}
+
+run_menu_action() {
+    local action="$1"
 
 if [[ "$action" == "10" ]]; then
     landscape_install
@@ -3332,6 +3397,11 @@ fi
 
 if [[ "$action" == "11" ]]; then
     cos_install
+    exit $?
+fi
+
+if [[ "$action" == "12" ]]; then
+    maas_install
     exit $?
 fi
 
@@ -3351,7 +3421,6 @@ if [[ "$action" == "9" ]]; then
 fi
 
 case $action in
-    0) echo "Cancelled."; exit 0 ;;
     1)
         scenario="microcloud"
         DEPLOYMENT_MODE="full"
@@ -3852,9 +3921,58 @@ fi
 
 }
 
+main() {
+    local rc=0 last_rc=0
+
+    if (( EUID == 0 )); then
+        log_warn "Do not run orchestrate.sh as root or with sudo."
+        log_warn "Run ./prep_host.sh as your regular user, refresh lxd group membership if prompted, then run ./orchestrate.sh."
+        exit 1
+    fi
+
+    cd "$SCRIPT_DIR"
+    clear_screen
+    print_banner
+
+    ensure_tools
+    detect_lxd_defaults
+    init_opentofu
+
+    while true; do
+        print_main_menu
+        if ! read_menu_choice; then
+            echo ""
+            exit "$last_rc"
+        fi
+        if [[ "$MENU_CHOICE" == "0" ]]; then
+            echo "Exiting."
+            exit 0
+        fi
+
+        # Every action runs in its own subshell, so the exit calls inside the lab flows
+        # end only that action and the menu comes back. errexit is enabled again inside
+        # because bash ignores it in a subshell that is part of an if/||/&& list.
+        set +e
+        ( set -e; run_menu_action "$MENU_CHOICE" )
+        rc=$?
+        set -e
+        last_rc=$rc
+        if (( rc != 0 )); then
+            log_warn "The action ended with exit status ${rc}; see the output above."
+        fi
+
+        if ! pause_before_menu; then
+            echo ""
+            exit "$last_rc"
+        fi
+        print_banner
+    done
+}
+
 source "${SCRIPT_DIR}/scripts/cluster_manager.sh"
 source "${SCRIPT_DIR}/scripts/landscape.sh"
 source "${SCRIPT_DIR}/scripts/cos.sh"
+source "${SCRIPT_DIR}/scripts/maas.sh"
 source "${SCRIPT_DIR}/scripts/lab_overview.sh"
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
