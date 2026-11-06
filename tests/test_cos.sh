@@ -275,9 +275,11 @@ host_config_stub() {
     [[ "$(cat "$TMP/calls")" == "unset loki.instance" ]] || fail "Cleanup must undo partial installs"
 )
 
-# The guest output is logged, and failures propagate through tee.
+# The guest output is logged, and failures propagate through tee. Only the COS versions are handed
+# to the guest.
 (
     SCRIPT_DIR="$REPO_ROOT"
+    COS_LITE_REF=track/test
     : > "$TMP/calls"
     cos_lxc() {
         case "$1 $2" in
@@ -292,7 +294,12 @@ host_config_stub() {
     calls="$(cat "$TMP/calls")"
     assert_contains "$calls" "push local:lab-cos/root/cos.env"
     assert_contains "$calls" "push local:lab-cos/root/cos-setup.sh"
-    assert_contains "$calls" "exec local:lab-cos -- bash /root/cos-setup.sh"
+    assert_contains "$calls" "exec local:lab-cos --env COS_"
+    assert_contains "$calls" "--env COS_LITE_REF=track/test"
+    assert_contains "$calls" "-- bash /root/cos-setup.sh"
+    for other in LANDSCAPE_ CM_ MAAS_ LXD_CHANNEL K8S_ JUJU_ UBUNTU_IMAGE; do
+        [[ "$calls" != *"--env ${other}"* ]] || fail "The COS VM must not receive ${other}* versions"
+    done
     assert_contains "$(cat "$COS_STATE_DIR/setup.log")" "guest output"
 
     cos_lxc() {
@@ -380,6 +387,7 @@ install_stubs() {
 # Instance and bridge: created with the owner label, or refused when someone else owns them.
 (
     export LXD_STORAGE_POOL=demo-pool
+    COS_VM_IMAGE=ubuntu:test-image
     : > "$TMP/calls"
     cos_lxc() {
         echo "$*" >> "$TMP/calls"
@@ -392,7 +400,7 @@ install_stubs() {
     calls="$(cat "$TMP/calls")"
     assert_contains "$calls" "network create local:lab-cosbr0 ipv4.address=172.31.7.1/24 ipv4.nat=true"
     assert_contains "$calls" "ipv4.dhcp.ranges=172.31.7.10-172.31.7.99 user.lab-automation.component=cos-demo"
-    assert_contains "$calls" "launch ubuntu:24.04 local:lab-cos --vm --network lab-cosbr0 --storage demo-pool"
+    assert_contains "$calls" "launch ubuntu:test-image local:lab-cos --vm --network lab-cosbr0 --storage demo-pool"
     assert_contains "$calls" "-c limits.cpu=4 -c limits.memory=12GiB -d root,size=60GiB -c user.lab-automation.component=cos-demo"
 
     cos_lxc() {
@@ -553,10 +561,12 @@ sed -n '/^lab_overview() {/,/^}/p' "${REPO_ROOT}/scripts/lab_overview.sh" | grep
 grep -q '^[[:space:]]*echo " 11) COS Lite' "${REPO_ROOT}/orchestrate.sh" || fail "Menu option 11 must install COS Lite"
 grep -A2 'action" == "11"' "${REPO_ROOT}/orchestrate.sh" | grep -q cos_install || fail "Option 11 must call cos_install"
 
-# Guest script: pinned COS Lite track, LXD scrape job and dashboard import.
+# Guest script: COS Lite track from versions.env, LXD scrape job and dashboard import.
 guest="${REPO_ROOT}/scripts/cos_guest.sh"
 bash -n "$guest" || fail "Guest script has a syntax error"
-grep -q 'COS_LITE_REF="track/3.1"' "$guest" || fail "COS Lite must use the pinned Terraform track"
+grep -qF '"${COS_LITE_REF:?}"' "$guest" || fail "The guest must require the COS Lite Terraform track from the host"
+grep -qF '?ref=${COS_LITE_REF}"' "$guest" || fail "COS Lite must use the Terraform track from versions.env"
+! grep -q 'tofu init.*-upgrade' "$guest" || fail "A rerun must keep the locked OpenTofu providers and module"
 grep -q 'metrics_path=/1.0/metrics' "$guest" || fail "Prometheus must scrape the LXD metrics path"
 grep -q 'dashboards/import' "$guest" || fail "The LXD dashboard must be imported"
 steps="$(grep -c '^step "' "$guest")"

@@ -33,9 +33,8 @@ variable "scenario" {
 }
 
 variable "ubuntu_image" {
-  description = "LXD image reference"
+  description = "LXD image reference; orchestrate.sh passes UBUNTU_IMAGE from versions.env"
   type        = string
-  default     = "ubuntu:24.04"
 }
 
 variable "ssh_public_key" {

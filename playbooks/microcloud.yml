@@ -22,13 +22,14 @@
       delay: 5
 
     - name: Check required snaps
-      # MicroCloud 3 LTS set, in the install order from the MicroCloud docs.
+      # MicroCloud 3 LTS set, in the install order from the MicroCloud docs. The channels come
+      # from versions.env through orchestrate.sh.
       command: snap list {{ item.name }}
       loop:
-        - { name: 'lxd', channel: '6/stable' }
-        - { name: 'microceph', channel: 'tentacle/stable' }
-        - { name: 'microovn', channel: '26.03/stable' }
-        - { name: 'microcloud', channel: '3/stable' }
+        - { name: 'lxd', channel: "{{ lxd_channel }}" }
+        - { name: 'microceph', channel: "{{ microceph_channel }}" }
+        - { name: 'microovn', channel: "{{ microovn_channel }}" }
+        - { name: 'microcloud', channel: "{{ microcloud_channel }}" }
       loop_control:
         label: "{{ item.name }}"
       register: snap_checks

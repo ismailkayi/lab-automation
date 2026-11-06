@@ -11,10 +11,7 @@ MAAS_SETTINGS="${MAAS_STATE_DIR}/settings.env"
 MAAS_ACCESS="${MAAS_STATE_DIR}/access.env"
 MAAS_WEB_PORT=5240
 
-# Versions and sizes can be overridden from the environment before starting.
-MAAS_CHANNEL="${MAAS_CHANNEL:-3.8/candidate}"
-MAAS_LXD_CHANNEL="${MAAS_LXD_CHANNEL:-5.21/stable}"
-MAAS_VM_IMAGE="${MAAS_VM_IMAGE:-ubuntu:24.04}"
+# Sizes can be overridden from the environment before starting; versions come from versions.env.
 MAAS_VM_CPU="${MAAS_VM_CPU:-6}"
 MAAS_VM_MEMORY_GIB="${MAAS_VM_MEMORY_GIB:-10}"
 MAAS_VM_DISK_GIB="${MAAS_VM_DISK_GIB:-100}"
@@ -168,12 +165,13 @@ maas_ensure_infrastructure() {
 }
 
 maas_run_setup() {
+    local -a versions=()
+    version_env_args versions MAAS_
     maas_lxc file push "$MAAS_SETTINGS" "local:${MAAS_VM}/root/maas.env" --mode 0600 || return 1
     maas_lxc file push "${SCRIPT_DIR}/scripts/maas_guest.sh" "local:${MAAS_VM}/root/maas-setup.sh" --mode 0700 || return 1
     log_info "Installing MAAS inside ${MAAS_VM}; this usually takes 10-15 minutes, longer on a slow connection. Output is also saved to ${MAAS_STATE_DIR}/setup.log"
     maas_lxc exec "local:${MAAS_VM}" \
-        --env "MAAS_IP=${MAAS_IP}" --env "MAAS_CHANNEL=${MAAS_CHANNEL}" \
-        --env "MAAS_LXD_CHANNEL=${MAAS_LXD_CHANNEL}" --env "MAAS_TARGET_COUNT=${MAAS_TARGET_COUNT}" \
+        --env "MAAS_IP=${MAAS_IP}" --env "MAAS_TARGET_COUNT=${MAAS_TARGET_COUNT}" "${versions[@]}" \
         -- bash /root/maas-setup.sh 2>&1 | tee -a "${MAAS_STATE_DIR}/setup.log"
     local -a status=("${PIPESTATUS[@]}")
     if (( status[0] != 0 || status[1] != 0 )); then

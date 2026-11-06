@@ -1,4 +1,6 @@
 #!/bin/bash
+# Variables set here are read by the sourced Landscape functions.
+# shellcheck disable=SC2034
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,6 +11,11 @@ trap 'rm -f -- "$TMP/settings.env" "$TMP/settings.bak" "$TMP/calls" "$TMP/setup.
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "Expected '$2' in '$1'"; }
+
+# Fixture versions, so the assertions do not depend on the current versions.env.
+LANDSCAPE_VM_IMAGE=ubuntu:server-image
+LANDSCAPE_RELEASE=9.9
+LANDSCAPE_CLIENT_RELEASES=26.04,24.04,22.04
 
 export LANDSCAPE_STATE_DIR="$TMP"
 LANDSCAPE_SETTINGS="$TMP/settings.env"
@@ -282,8 +289,9 @@ install_stubs() {
     landscape_lxc() { echo "not attached"; }
     output="$(landscape_install)"
     calls="$(cat "$TMP/calls")"
-    assert_contains "$calls" $'ensure lab-landscape server ubuntu:24.04\nensure lab-landscape-client-2604 client ubuntu:26.04\nensure lab-landscape-client-2404 client ubuntu:24.04\nensure lab-landscape-client-2204 client ubuntu:22.04\nsetup 10.1.1.2\naccess 10.1.1.2'
+    assert_contains "$calls" $'ensure lab-landscape server ubuntu:server-image\nensure lab-landscape-client-2604 client ubuntu:26.04\nensure lab-landscape-client-2404 client ubuntu:24.04\nensure lab-landscape-client-2204 client ubuntu:22.04\nsetup 10.1.1.2\naccess 10.1.1.2'
     assert_contains "$calls" $'register lab-landscape-client-2604\nregister lab-landscape-client-2404\nregister lab-landscape-client-2204'
+    assert_contains "$output" "Landscape 9.9 demo is ready"
     assert_contains "$output" "Login"
     assert_contains "$output" "https://10.1.1.2/"
     [[ "$output" != *"https://landscape.demo.internal"* ]] || fail "Browser URL must not require a hosts entry"
@@ -364,6 +372,7 @@ install_stubs() {
 
 (
     : > "$TMP/calls"
+    LANDSCAPE_OUTBOX_CHANNEL=7.7/test
     landscape_lxc() {
         case "$1" in
             file) echo "push $4" >> "$TMP/calls" ;;
@@ -375,8 +384,15 @@ install_stubs() {
         fail "Guest setup failure must propagate through tee"
     fi
     assert_contains "$(cat "$TMP/setup.log")" "guest output"
-    assert_contains "$(cat "$TMP/calls")" "push local:lab-landscape/root/landscape-setup.sh"
-    assert_contains "$(cat "$TMP/calls")" "exec local:lab-landscape --env SERVER_IP=10.1.1.2 -- bash /root/landscape-setup.sh"
+    calls="$(cat "$TMP/calls")"
+    assert_contains "$calls" "push local:lab-landscape/root/landscape-setup.sh"
+    assert_contains "$calls" "exec local:lab-landscape --env SERVER_IP=10.1.1.2 --env LANDSCAPE_"
+    assert_contains "$calls" "--env LANDSCAPE_RELEASE=9.9"
+    assert_contains "$calls" "--env LANDSCAPE_OUTBOX_CHANNEL=7.7/test"
+    assert_contains "$calls" "-- bash /root/landscape-setup.sh"
+    for other in CM_ COS_ MAAS_ LXD_CHANNEL K8S_ JUJU_ UBUNTU_IMAGE; do
+        [[ "$calls" != *"--env ${other}"* ]] || fail "The Landscape server must not receive ${other}* versions"
+    done
     landscape_lxc() { return 0; }
     tee() { cat >/dev/null; return 1; }
     if landscape_run_setup 10.1.1.2 >/dev/null; then

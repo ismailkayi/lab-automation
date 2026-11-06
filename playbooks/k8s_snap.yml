@@ -23,7 +23,8 @@
       failed_when: false
 
     - name: Install Canonical K8s snap if missing
-      command: snap install k8s --channel=1.35-classic/stable --classic
+      # The channel comes from versions.env through orchestrate.sh.
+      command: snap install k8s --channel={{ k8s_channel }} --classic
       when: snap_check_k8s.rc != 0
       changed_when: true
 

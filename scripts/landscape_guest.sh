@@ -8,6 +8,9 @@ export NEEDRESTART_SUSPEND=1
 # shellcheck source=/dev/null
 source /root/landscape.env
 : "${SERVER_IP:?SERVER_IP must be passed by the host}"
+# The host also passes the versions from versions.env.
+: "${LANDSCAPE_RELEASE:?}" "${LANDSCAPE_DEBARCHIVE_CHANNEL:?}" "${LANDSCAPE_TASK_HANDLER_CHANNEL:?}" \
+    "${LANDSCAPE_OUTBOX_CHANNEL:?}"
 trap 'echo "ERROR at line ${LINENO}; fix the problem and rerun menu 10." >&2' ERR
 
 APT=(apt-get -y -q -o DPkg::Lock::Timeout=900
@@ -45,7 +48,7 @@ psql_query() { runuser -u postgres -- psql -v ON_ERROR_STOP=1 -tAq "$@"; }
 configure_debarchive() {
     local password
     if ! snap list landscape-debarchive >/dev/null 2>&1; then
-        snap install landscape-debarchive --channel=latest/stable
+        snap install landscape-debarchive --channel="$LANDSCAPE_DEBARCHIVE_CHANNEL"
     fi
     password="$(snap get landscape-debarchive deb.archive.database.password 2>/dev/null)" || password=""
     if [[ ! "$password" =~ ^[A-Za-z0-9]{24}$ ]]; then
@@ -149,7 +152,7 @@ if [[ -f /var/lib/lab-landscape/ready ]]; then
     exit 0
 fi
 
-echo "==> Preparing Ubuntu 24.04 for Landscape 26.04 LTS"
+echo "==> Preparing the server for Landscape ${LANDSCAPE_RELEASE}"
 cloud-init status --wait
 mkdir -p /var/lib/lab-landscape /etc/cloud/cloud.cfg.d
 # Quickstart builds its certificate from the FQDN.
@@ -174,15 +177,15 @@ grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fs
 snap wait system seed.loaded
 "${APT[@]}" update
 "${APT[@]}" install software-properties-common curl ca-certificates
-add-apt-repository -y ppa:landscape/self-hosted-26.04
+add-apt-repository -y "ppa:landscape/self-hosted-${LANDSCAPE_RELEASE}"
 "${APT[@]}" update
 "${APT[@]}" install landscape-server-quickstart
 version="$(dpkg-query -W -f='${Version}' landscape-server)"
-[[ "$version" == 26.04* ]] || { echo "Unexpected Landscape version: ${version}" >&2; exit 1; }
+[[ "$version" == "${LANDSCAPE_RELEASE}"* ]] || { echo "Unexpected Landscape version: ${version}" >&2; exit 1; }
 
 echo "==> Configuring Task Handler, Outbox and Debarchive services"
 if ! snap list landscape-task-handler >/dev/null 2>&1; then
-    snap install landscape-task-handler --channel=latest/stable
+    snap install landscape-task-handler --channel="$LANDSCAPE_TASK_HANDLER_CHANNEL"
 fi
 if [[ "$(psql_query -c "SELECT 1 FROM pg_database WHERE datname='landscape-standalone-task-handler'")" != "1" ]]; then
     runuser -u postgres -- createdb landscape-standalone-task-handler
@@ -209,7 +212,7 @@ snap set landscape-task-handler \
     landscape.task-handler.server.host=localhost
 unset db_password
 if ! snap list landscape-outbox >/dev/null 2>&1; then
-    snap install landscape-outbox --channel=latest/stable
+    snap install landscape-outbox --channel="$LANDSCAPE_OUTBOX_CHANNEL"
 fi
 snap connect landscape-outbox:grpc-client-certs landscape-task-handler:grpc-client-certs
 configure_debarchive

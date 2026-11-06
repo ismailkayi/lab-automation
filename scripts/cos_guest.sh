@@ -8,6 +8,10 @@ export PATH="$PATH:/snap/bin"
 # shellcheck source=/dev/null
 source /root/cos.env
 
+# The host passes the versions from versions.env.
+: "${COS_K8S_CHANNEL:?}" "${COS_JUJU_CHANNEL:?}" "${COS_OPENTOFU_CHANNEL:?}" \
+    "${COS_LITE_REF:?}" "${COS_SCRAPE_TARGET_CHANNEL:?}"
+
 COS_IP="${SUBNET_PREFIX}.200"
 LB_ANNOTATIONS="metallb.io/loadBalancerIPs=${COS_IP},lbipam.cilium.io/ips=${COS_IP}"
 # The host's LXD metrics endpoint, bound by the host to the bridge gateway.
@@ -15,7 +19,6 @@ LXD_METRICS_TARGET="${SUBNET_PREFIX}.1:8444"
 CONTROLLER="lab-cos"
 MODEL="${CONTROLLER}:cos"
 TF_DIR="/root/cos-lite"
-COS_LITE_REF="track/3.1"
 LXD_DASHBOARD_URL="https://grafana.com/api/dashboards/19131/revisions/5/download"
 STEP=0
 
@@ -59,9 +62,9 @@ install_snap() {
 step "Installing snaps"
 cloud-init status --wait >/dev/null || true
 snap wait system seed.loaded
-install_snap k8s 1.35-classic/stable --classic
-install_snap juju 3.6/stable
-install_snap opentofu latest/stable --classic
+install_snap k8s "$COS_K8S_CHANNEL" --classic
+install_snap juju "$COS_JUJU_CHANNEL"
+install_snap opentofu "$COS_OPENTOFU_CHANNEL" --classic
 command -v git >/dev/null || retry apt-get install -y git
 
 step "Bootstrapping Canonical Kubernetes"
@@ -126,12 +129,13 @@ module "cos_lite" {
 }
 EOF
 cd "$TF_DIR"
-retry tofu init -input=false -upgrade
+# No -upgrade: a rerun keeps the locked providers and the downloaded module.
+retry tofu init -input=false
 retry tofu apply -input=false -auto-approve
 
 step "Adding the host's LXD as a Prometheus scrape target"
 if ! juju show-application -m "$MODEL" lxd-host >/dev/null 2>&1; then
-    retry juju deploy -m "$MODEL" prometheus-scrape-target-k8s lxd-host --channel 3.0/stable
+    retry juju deploy -m "$MODEL" prometheus-scrape-target-k8s lxd-host --channel "$COS_SCRAPE_TARGET_CHANNEL"
 fi
 juju config -m "$MODEL" lxd-host job_name=lxd targets="$LXD_METRICS_TARGET" scheme=https \
     metrics_path=/1.0/metrics tls_config_insecure_skip_verify=true

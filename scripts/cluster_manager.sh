@@ -115,7 +115,7 @@ cm_ensure_infrastructure() {
             [[ "${answer,,}" == "y" ]] || return 1
         fi
         log_info "Creating VM ${CM_VM} (6 vCPU, 12 GiB RAM, 80 GiB disk)."
-        cm_lxc launch ubuntu:24.04 "local:${CM_VM}" --vm --network "$CM_NETWORK" \
+        cm_lxc launch "$CM_VM_IMAGE" "local:${CM_VM}" --vm --network "$CM_NETWORK" \
             -c limits.cpu=6 -c limits.memory=12GiB -d root,size=80GiB \
             -c user.lab-automation.component=cluster-manager || return 1
     elif [[ "$(cm_lxc list "local:${CM_VM}" -c s -f csv)" != "RUNNING" ]]; then
@@ -153,13 +153,15 @@ EOF
 }
 
 cm_install() {
+    local -a versions=()
+    version_env_args versions CM_
     cm_prepare_settings || return 1
     cm_ensure_infrastructure || return 1
     cm_lxc file push "$CM_SETTINGS" "local:${CM_VM}/root/cluster-manager.env" --mode 0600 || return 1
     cm_lxc file push "$CM_GUEST_SCRIPT" "local:${CM_VM}/root/cluster-manager-setup.sh" --mode 0700 || return 1
 
     log_info "Installing inside the VM; output is also saved to ${CM_STATE_DIR}/setup.log"
-    if ! cm_lxc exec "local:${CM_VM}" -- bash /root/cluster-manager-setup.sh 2>&1 \
+    if ! cm_lxc exec "local:${CM_VM}" "${versions[@]}" -- bash /root/cluster-manager-setup.sh 2>&1 \
         | tee -a "${CM_STATE_DIR}/setup.log"; then
         log_warn "Installation stopped. Rerun 'Install / resume' after fixing the reported problem."
         return 1

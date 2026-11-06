@@ -56,6 +56,70 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
+# Product versions come from versions.env; a variable already exported in the shell wins over the
+# file. Every value is exported for the host scripts. VERSION_EXTRA_VARS hands them to Ansible as
+# lowercase variables and version_env_args hands a product's keys to its setup script in the VM.
+VERSION_KEYS=()
+VERSION_EXTRA_VARS=()
+
+load_versions() {
+    local file="$1" line key value override lineno=0
+    local line_pattern='^([A-Z][A-Z0-9_]*)=([A-Za-z0-9._/:@,+~-]+)$'
+    local value_pattern='^[A-Za-z0-9._/:@,+~-]+$'
+    local seen=" "
+
+    VERSION_KEYS=()
+    VERSION_EXTRA_VARS=()
+    if [[ ! -r "$file" ]]; then
+        log_warn "Cannot read ${file}." >&2
+        return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        lineno=$((lineno + 1))
+        if [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]]; then
+            continue
+        fi
+        if [[ ! "$line" =~ $line_pattern ]]; then
+            log_warn "${file}:${lineno}: expected KEY=value (uppercase key; the value has no spaces or quotes)." >&2
+            return 1
+        fi
+        key="${BASH_REMATCH[1]}"
+        value="${BASH_REMATCH[2]}"
+        if [[ "$seen" == *" ${key} "* ]]; then
+            log_warn "${file}:${lineno}: ${key} is defined twice." >&2
+            return 1
+        fi
+        seen+="${key} "
+        override="$(printenv "$key" || true)"
+        if [[ -n "$override" ]]; then
+            if [[ ! "$override" =~ $value_pattern ]]; then
+                log_warn "The exported ${key} has an unsupported value: letters, digits and . _ / : @ , + ~ - only." >&2
+                return 1
+            fi
+            value="$override"
+        fi
+        export "${key}=${value}"
+        VERSION_KEYS+=("$key")
+        VERSION_EXTRA_VARS+=(-e "${key,,}=${value}")
+    done < "$file"
+}
+
+# version_env_args ARRAY PREFIX fills ARRAY with an "--env KEY=value" pair for every versions.env
+# key that starts with PREFIX, so a setup script only receives the keys of its own product.
+version_env_args() {
+    local -n out="$1"
+    local prefix="$2" key
+    out=()
+    for key in "${VERSION_KEYS[@]}"; do
+        if [[ "$key" == "$prefix"* ]]; then
+            out+=(--env "${key}=$(printenv "$key")")
+        fi
+    done
+}
+
+load_versions "${SCRIPT_DIR}/versions.env" || exit 1
+export TF_VAR_ubuntu_image="${UBUNTU_IMAGE:?UBUNTU_IMAGE is missing from versions.env}"
+
 print_divider() {
     printf '%s\n' "----------------------------------------------------------"
 }
@@ -3046,7 +3110,7 @@ deploy_lab() {
             print_k8s_training_summary "$workspace_name" "$scenario"
         else
             log_info "Running Ansible Orchestration for K8s..."
-            ansible-playbook -i "$inventory_file" playbooks/k8s_snap.yml
+            ansible-playbook -i "$inventory_file" "${VERSION_EXTRA_VARS[@]}" playbooks/k8s_snap.yml
             log_success "K8s Lab Deployed Successfully!"
             print_k8s_summary "$workspace_name"
         fi
@@ -3060,7 +3124,7 @@ deploy_lab() {
             print_microcloud_infra_summary "$workspace_name"
         else
             log_info "Running Ansible Orchestration for MicroCloud..."
-            ansible-playbook -i "$inventory_file" playbooks/microcloud.yml
+            ansible-playbook -i "$inventory_file" "${VERSION_EXTRA_VARS[@]}" playbooks/microcloud.yml
             log_success "MicroCloud Lab Deployed Successfully!"
             print_microcloud_summary "$workspace_name"
         fi
@@ -3074,7 +3138,7 @@ deploy_lab() {
             print_k8s_training_summary "$workspace_name" "$scenario"
         else
             log_info "Running Ansible Orchestration for K8s (Juju)..."
-            ansible-playbook -i "$inventory_file" playbooks/k8s_juju.yml
+            ansible-playbook -i "$inventory_file" "${VERSION_EXTRA_VARS[@]}" playbooks/k8s_juju.yml
             log_success "K8s Juju Lab Deployed Successfully!"
             print_k8s_juju_summary "$workspace_name"
         fi
@@ -3364,7 +3428,7 @@ print_main_menu() {
     echo "  8) Destroy Environments"
     print_section "INSTRUCTOR SERVICES"
     echo "  9) Cluster Manager (central view of MicroClouds; participant accounts)"
-    echo " 10) Landscape 26.04 (server + Ubuntu 26.04/24.04/22.04 clients)"
+    echo " 10) Landscape ${LANDSCAPE_RELEASE} (server + Ubuntu ${LANDSCAPE_CLIENT_RELEASES//,//} clients)"
     echo " 11) COS Lite (Grafana, Prometheus, Loki; monitors this host's LXD)"
     echo " 12) MAAS ${MAAS_CHANNEL%%/*} (commission, deploy and release demo machines)"
     echo ""

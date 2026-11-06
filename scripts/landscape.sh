@@ -4,8 +4,6 @@
 LANDSCAPE_VM="lab-landscape"
 LANDSCAPE_FQDN="landscape.demo.internal"
 LANDSCAPE_CLIENT_PREFIX="lab-landscape-client"
-# One client per Ubuntu release gives the demo a mixed inventory.
-LANDSCAPE_CLIENT_RELEASES=(26.04 24.04 22.04)
 LANDSCAPE_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/lab-automation/landscape"
 LANDSCAPE_SETTINGS="${LANDSCAPE_STATE_DIR}/settings.env"
 
@@ -134,11 +132,13 @@ landscape_ensure_instance() {
 
 landscape_run_setup() {
     local ip="$1"
+    local -a versions=()
+    version_env_args versions LANDSCAPE_
     landscape_lxc file push "$LANDSCAPE_SETTINGS" "local:${LANDSCAPE_VM}/root/landscape.env" --mode 0600 || return 1
     landscape_lxc file push "${SCRIPT_DIR}/scripts/landscape_guest.sh" \
         "local:${LANDSCAPE_VM}/root/landscape-setup.sh" --mode 0700 || return 1
     log_info "Installing or checking the Landscape server; output is also saved to ${LANDSCAPE_STATE_DIR}/setup.log"
-    landscape_lxc exec "local:${LANDSCAPE_VM}" --env "SERVER_IP=${ip}" -- bash /root/landscape-setup.sh 2>&1 \
+    landscape_lxc exec "local:${LANDSCAPE_VM}" --env "SERVER_IP=${ip}" "${versions[@]}" -- bash /root/landscape-setup.sh 2>&1 \
         | tee -a "${LANDSCAPE_STATE_DIR}/setup.log"
     local -a status=("${PIPESTATUS[@]}")
     if (( status[0] != 0 || status[1] != 0 )); then
@@ -193,7 +193,7 @@ landscape_instances() {
 
 landscape_install() {
     local ip release client pro missing_pro=0
-    local -a clients=()
+    local -a clients=() releases=()
     if [[ ! -f "$LANDSCAPE_SETTINGS" ]] && landscape_lxc info "local:${LANDSCAPE_VM}" >/dev/null 2>&1; then
         log_warn "The Landscape instance exists but saved settings are missing; refusing to replace its credentials."
         return 1
@@ -202,9 +202,10 @@ landscape_install() {
     landscape_read_pro_token
     # shellcheck source=/dev/null
     source "$LANDSCAPE_SETTINGS"
-    landscape_ensure_instance "$LANDSCAPE_VM" server ubuntu:24.04 || return 1
-    # Clients boot while the server installs.
-    for release in "${LANDSCAPE_CLIENT_RELEASES[@]}"; do
+    landscape_ensure_instance "$LANDSCAPE_VM" server "$LANDSCAPE_VM_IMAGE" || return 1
+    # One client per Ubuntu release gives the demo a mixed inventory. Clients boot while the server installs.
+    IFS=, read -r -a releases <<< "$LANDSCAPE_CLIENT_RELEASES"
+    for release in "${releases[@]}"; do
         client="${LANDSCAPE_CLIENT_PREFIX}-${release//./}"
         landscape_ensure_instance "$client" client "ubuntu:${release}" || return 1
         clients+=("$client")
@@ -219,7 +220,7 @@ landscape_install() {
         log_info "Registering ${client}"
         landscape_setup_client "$ip" "$client" || return 1
     done
-    log_success "Landscape 26.04 demo is ready."
+    log_success "Landscape ${LANDSCAPE_RELEASE} demo is ready."
     print_section "Landscape demo"
     print_kv "URL" "https://${ip}/ (accept the private demo's self-signed certificate)"
     print_kv "Login" "${ADMIN_EMAIL} / ${ADMIN_PASSWORD}"

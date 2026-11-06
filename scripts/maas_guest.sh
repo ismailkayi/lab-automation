@@ -9,14 +9,12 @@ export DEBIAN_FRONTEND=noninteractive
 # shellcheck source=/dev/null
 source /root/maas.env
 
-# MAAS_IP and the channels are passed in by the host script.
-: "${MAAS_IP:?MAAS_IP is not set}"
-MAAS_CHANNEL="${MAAS_CHANNEL:-3.8/candidate}"
-LXD_CHANNEL="${MAAS_LXD_CHANNEL:-5.21/stable}"
-POSTGRESQL_CHANNEL="16/stable"
+# The host passes MAAS_IP, MAAS_TARGET_COUNT and the versions from versions.env.
+: "${MAAS_IP:?MAAS_IP is not set}" "${MAAS_CHANNEL:?}" "${MAAS_POSTGRESQL_CHANNEL:?}" \
+    "${MAAS_LXD_CHANNEL:?}" "${MAAS_DEPLOY_SERIES:?}"
 TARGET_COUNT="${MAAS_TARGET_COUNT:-2}"
 
-SERIES="noble"
+SERIES="$MAAS_DEPLOY_SERIES"
 MAAS_URL="http://${MAAS_IP}:5240/MAAS"
 PXE_CIDR="${PXE_PREFIX}.0/24"
 PXE_GATEWAY="${PXE_PREFIX}.1"
@@ -82,7 +80,7 @@ if [[ ! -e /dev/kvm ]]; then
 fi
 snapd_ready() { dpkg --compare-versions "$(snap version | awk '$1 == "snapd" {print $2}')" ge 2.75; }
 snapd_ready || retry snap refresh snapd
-snapd_ready || { echo "ERROR: MAAS 3.8 needs snapd 2.75 or newer." >&2; false; }
+snapd_ready || { echo "ERROR: MAAS needs snapd 2.75 or newer." >&2; false; }
 # MAAS runs its own chrony, which conflicts with systemd-timesyncd before Ubuntu 25.10.
 if dpkg --compare-versions "$(. /etc/os-release && echo "$VERSION_ID")" lt 25.10; then
     systemctl disable --now systemd-timesyncd 2>/dev/null || true
@@ -90,12 +88,14 @@ fi
 command -v jq >/dev/null || { retry apt-get update -qq; retry apt-get install -y -qq jq; }
 
 step "Installing the MAAS, PostgreSQL and LXD snaps"
-install_snap postgresql "$POSTGRESQL_CHANNEL"
+install_snap postgresql "$MAAS_POSTGRESQL_CHANNEL"
 install_snap maas "$MAAS_CHANNEL"
+# The hold below marks an LXD that an earlier run has already set up; a rerun leaves its channel alone.
+lxd_held() { snap list lxd | awk 'NR == 2 && /held/ {found = 1} END {exit !found}'; }
 if ! snap list lxd >/dev/null 2>&1; then
-    retry snap install lxd --channel="$LXD_CHANNEL"
-elif [[ "$(snap list lxd | awk 'NR == 2 {print $4}')" != "$LXD_CHANNEL" ]]; then
-    retry snap refresh lxd --channel="$LXD_CHANNEL"
+    retry snap install lxd --channel="$MAAS_LXD_CHANNEL"
+elif ! lxd_held && [[ "$(snap list lxd | awk 'NR == 2 {print $4}')" != "$MAAS_LXD_CHANNEL" ]]; then
+    retry snap refresh lxd --channel="$MAAS_LXD_CHANNEL"
 fi
 # The demo stays on the installed revisions until the instructor updates them.
 snap refresh --hold=forever maas postgresql lxd >/dev/null

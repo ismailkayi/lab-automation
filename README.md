@@ -85,18 +85,37 @@ Some terms used in this guide:
 
 ## Product Versions
 
-Full deployments install the following snap channels and charms. Training
-deployments install nothing; participants install the products themselves.
+Every version the automation installs is set in [`versions.env`](versions.env):
+snap and charm channels, the Ubuntu image of the VMs, the Keycloak image and
+the COS Lite release. The file has one `KEY=value` line per item, grouped by
+lab type and product. Open it to see what a lab installs. Full deployments and
+the instructor services read it; training deployments install nothing, because
+participants install the products themselves.
 
-| Product | Channel |
-| --- | --- |
-| MicroCloud (LTS) | `microcloud` snap `3/stable` |
-| LXD | `lxd` snap `6/stable` |
-| MicroCeph | `microceph` snap `tentacle/stable` |
-| MicroOVN | `microovn` snap `26.03/stable` |
-| Canonical Kubernetes (Snap) | `k8s` snap `1.35-classic/stable` |
-| Juju (LTS) | `juju` snap `3.6/stable` |
-| Canonical Kubernetes (Juju) | `k8s` and `k8s-worker` charms `1.35/stable`, base `ubuntu@24.04` |
+To use other versions, edit the file, or set a variable for a single run:
+
+```bash
+MAAS_CHANNEL=3.9/stable ./orchestrate.sh
+```
+
+- A variable set in your shell wins over the file, so a one-off change needs
+  no edit and cannot conflict with a later `git pull`.
+- The file is read when the script starts. A malformed line stops the script
+  with its line number before anything is changed.
+- Only new installs use the values. Nothing that is already installed is
+  upgraded, so destroy a lab or service and build it again to get other
+  versions. Two things are applied declaratively on every run and so reach an
+  existing install: the Keycloak image of Cluster Manager (`CM_KEYCLOAK_IMAGE`)
+  and the COS Lite release (`COS_LITE_REF`).
+- A floating channel such as `latest/stable` can resolve to a different
+  revision on a different day, so labs built on different days can differ.
+- Some values must change together: the four MicroCloud snaps, the Kubernetes
+  snap and charm tracks, and `K8S_CHARM_BASE` with `UBUNTU_IMAGE`. Comments in
+  the file mark them.
+- The tools that `prep_host.sh` installs on this host (LXD, OpenTofu, Ansible)
+  are not covered.
+- Documents that name a version, such as a lab guide, do not follow this file.
+  Update them when you change a value.
 
 The MicroCloud snaps are installed with `--cohort=+` in the order given in the
 MicroCloud documentation. On reruns, snaps that are already installed are not
@@ -258,7 +277,8 @@ INSTRUCTOR SERVICES
 Options 1-6 create the participant labs. The instructor services (9-12) run in
 separate VMs on the lab host, are installed by the instructor and are removed
 with **8) Destroy Environments**; **7) Lab overview** lists them in a separate
-section from the participant labs.
+section from the participant labs. The version numbers in the menu come from
+`versions.env`.
 
 Type a number and press Enter. When an action finishes, or is cancelled, its
 output stays on screen until you press Enter; the menu then appears again, so
@@ -757,9 +777,9 @@ The installer creates a separate bridge, `lab-cmbr0`, using the first free
 80 GiB disk). Existing labs are not changed. Inside the VM,
 `scripts/cluster_manager_guest.sh` installs:
 
-- Canonical Kubernetes (`1.35-classic/stable`);
-- Juju (`3.6/stable`);
-- Keycloak `26.8.1`;
+- Canonical Kubernetes and Juju (the `CM_K8S_CHANNEL` and `CM_JUJU_CHANNEL`
+  values in `versions.env`);
+- Keycloak (`CM_KEYCLOAK_IMAGE`);
 - the Cluster Manager, PostgreSQL, Traefik and self-signed certificate charms.
 
 | Service | Address |
@@ -791,7 +811,7 @@ Manager**) deletes only the VM, the bridge and the stored credentials.
 
 ## Instructor Landscape Demo
 
-Select **10) Landscape 26.04** for a small instructor-led demonstration.
+Select **10) Landscape** for a small instructor-led demonstration.
 It installs everything in one step; remove it with **8) Destroy Environments >
 Landscape demo**. Other instances such as `landscape-2604` are not touched.
 
@@ -803,11 +823,14 @@ to the same demo block.
 
 | Component | Instance | Resources |
 | --- | --- | --- |
-| Landscape 26.04 LTS Quickstart | `lab-landscape` (Ubuntu 24.04 VM) | 2 vCPU, 8 GiB RAM, 40 GiB disk, 4 GiB guest swap |
-| 3 registered clients: Ubuntu 26.04, 24.04 and 22.04 | `lab-landscape-client-2604`, `-2404`, `-2204` (system containers) | 1 vCPU, 512 MiB RAM, 8 GiB disk each |
+| Landscape Quickstart | `lab-landscape` (Ubuntu VM) | 2 vCPU, 8 GiB RAM, 40 GiB disk, 4 GiB guest swap |
+| 3 registered clients, one per release in `LANDSCAPE_CLIENT_RELEASES` (Ubuntu 26.04, 24.04 and 22.04 by default) | `lab-landscape-client-2604`, `-2404`, `-2204` (system containers) | 1 vCPU, 512 MiB RAM, 8 GiB disk each |
 
-- Ubuntu 24.04 is the server OS because Quickstart does not support 26.04; the
-  Landscape application is 26.04 from `ppa:landscape/self-hosted-26.04`.
+- The server VM runs the Ubuntu image from `LANDSCAPE_VM_IMAGE`, which can
+  differ from the Landscape release in `LANDSCAPE_RELEASE`. By default the VM
+  is Ubuntu 24.04 and Landscape is 26.04, because Quickstart does not support
+  26.04 as the server OS; the application comes from
+  `ppa:landscape/self-hosted-<release>`.
 - The clients start while the server is being installed and are registered at
   the end.
 - Task Handler, Outbox and **Debarchive** are added. Debarchive backs the
@@ -858,10 +881,11 @@ COS Lite demo**.
 
 | Component | Instance | Resources |
 | --- | --- | --- |
-| Canonical Kubernetes, Juju 3.6 and COS Lite (Grafana, Prometheus, Loki, Alertmanager, Traefik, Catalogue) | `lab-cos` (Ubuntu 24.04 VM) on its own bridge `lab-cosbr0` | 4 vCPU, 12 GiB RAM, 60 GiB disk |
+| Canonical Kubernetes, Juju and COS Lite (Grafana, Prometheus, Loki, Alertmanager, Traefik, Catalogue) | `lab-cos` (Ubuntu VM) on its own bridge `lab-cosbr0` | 4 vCPU, 12 GiB RAM, 60 GiB disk |
 
 - COS Lite is deployed with the official Terraform module
-  (`canonical/observability-stack`, `track/3.1`) through OpenTofu inside the VM.
+  (`canonical/observability-stack`, the Git ref in `COS_LITE_REF`) through
+  OpenTofu inside the VM.
   The installation takes about 20-30 minutes.
 - COS monitors **this host's LXD**, so the demo shows real instances (the
   training labs, Landscape, Cluster Manager) without extra agents:
@@ -903,14 +927,14 @@ State: `~/.local/state/lab-automation/cos/` (`settings.env`, `access.env`,
 
 ## Instructor MAAS Demo
 
-Select **12) MAAS 3.8** for a short instructor-led demonstration of the MAAS
+Select **12) MAAS** for a short instructor-led demonstration of the MAAS
 machine lifecycle: commission, deploy and release. Setup installs MAAS and
 leaves two commissioned machines **Ready**; you deploy and release them live.
 Remove the demo with **8) Destroy Environments > MAAS demo**.
 
 | Component | Instance | Resources |
 | --- | --- | --- |
-| MAAS 3.8 (region and rack controller), PostgreSQL 16 and an LXD host that provides the demo machines | `lab-maas` (Ubuntu 24.04 VM) on its own bridge `lab-maasbr0` | 6 vCPU, 10 GiB RAM, 100 GiB disk |
+| MAAS (region and rack controller), PostgreSQL and an LXD host that provides the demo machines | `lab-maas` (Ubuntu VM) on its own bridge `lab-maasbr0` | 6 vCPU, 10 GiB RAM, 100 GiB disk |
 
 - No bare-metal hardware is needed. Inside `lab-maas`, LXD supplies virtual
   machines on a private bridge (`maas-pxe`); MAAS provides DHCP and DNS and
@@ -919,8 +943,11 @@ Remove the demo with **8) Destroy Environments > MAAS demo**.
 - The host must offer nested KVM (`/dev/kvm` with nested virtualization
   enabled) and at least the VM memory plus 1 GiB of available memory; option 12
   checks both before it creates the VM.
-- MAAS is installed from the `3.8/candidate` snap channel. Set `MAAS_CHANNEL`
-  (for example `3.8/stable`) before starting to use another channel.
+- MAAS, PostgreSQL and LXD are installed from the snap channels in
+  `versions.env` (`MAAS_CHANNEL`, `MAAS_POSTGRESQL_CHANNEL` and
+  `MAAS_LXD_CHANNEL`). The snaps are held, so they stay on their installed
+  revisions. A rerun never upgrades an installed MAAS: for a different
+  version, destroy the demo and install it again.
 - Setup creates two machines, `maas-demo-01` and `maas-demo-02` (2 vCPU, 2 GiB
   RAM and 20 GB disk each), commissions them and tags them `demo`. Both stay
   **Ready**, so nothing is deployed until you do it live. Setup also uploads an
@@ -933,13 +960,11 @@ Remove the demo with **8) Destroy Environments > MAAS demo**.
   creates missing machines and waits for machines that are still being
   commissioned.
 
-Environment variables read when option 12 starts:
+Besides the versions in `versions.env`, option 12 reads these environment
+variables when it starts:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MAAS_CHANNEL` | `3.8/candidate` | MAAS snap channel |
-| `MAAS_LXD_CHANNEL` | `5.21/stable` | LXD snap channel inside the VM |
-| `MAAS_VM_IMAGE` | `ubuntu:24.04` | Image of the `lab-maas` VM |
 | `MAAS_VM_CPU`, `MAAS_VM_MEMORY_GIB`, `MAAS_VM_DISK_GIB` | `6`, `10`, `100` | Size of the VM, applied when it is created |
 | `MAAS_TARGET_COUNT` | `2` | Number of demo machines. Raising it on a rerun adds machines |
 
@@ -954,13 +979,15 @@ Demo flow:
 1. Open the web UI and show the **Machines** list: both demo machines are
    **Ready** and tagged `demo`. Show the VM host, the machine network with DHCP
    enabled and the synced Ubuntu images.
-2. Select `maas-demo-01` and use **Take action > Deploy** with Ubuntu 24.04 LTS.
+2. Select `maas-demo-01` and use **Take action > Deploy** with Ubuntu 24.04 LTS
+   (the series in `MAAS_DEPLOY_SERIES`, the one setup imported).
    A deployment takes several minutes, so start it first and continue with the
    next points while it runs. Deploy `maas-demo-02` too if you want to show two
    machines at once.
 3. When the machine is **Deployed**, log in from the instructor shell with
-   `lxc exec lab-maas -- ssh ubuntu@<machine IP>` (accept the host key; the SSH
-   key is already uploaded to MAAS).
+   `lxc exec lab-maas -- ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@<machine IP>`.
+   The SSH key is already uploaded to MAAS; the options skip the host key check
+   because every deployment creates new host keys.
 4. **Release** the machines to return them to Ready.
 
 The same lifecycle from the instructor shell (`lxc exec lab-maas -- bash`):
@@ -1252,6 +1279,7 @@ sharing logs.
 | --- | --- |
 | `prep_host.sh` | Host preparation and prerequisite validation |
 | `orchestrate.sh` | Interactive deployment and lifecycle management |
+| `versions.env` | Snap and charm channels, images and Git refs that the scripts install |
 | `main.tf` | LXD infrastructure definitions |
 | `.terraform.lock.hcl` | Locked OpenTofu provider versions and checksums |
 | `playbooks/microcloud.yml` | Full MicroCloud installation and validation |
@@ -1260,7 +1288,7 @@ sharing logs.
 | `scripts/cluster_manager.sh` | Instructor Cluster Manager menu (host side) |
 | `scripts/cluster_manager_guest.sh` | Cluster Manager installation inside the service VM |
 | `scripts/landscape.sh` | Instructor Landscape demo lifecycle |
-| `scripts/landscape_guest.sh` | Minimal Landscape 26.04 server installation |
+| `scripts/landscape_guest.sh` | Minimal Landscape server installation |
 | `scripts/landscape_client.sh` | Single demo client registration |
 | `scripts/cos.sh` | Instructor COS Lite demo lifecycle and host LXD monitoring settings |
 | `scripts/cos_guest.sh` | Canonical Kubernetes, Juju and COS Lite installation inside the demo VM |

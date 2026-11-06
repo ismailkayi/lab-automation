@@ -9,6 +9,8 @@
 # - Run Juju operations through `lxc exec <controller> ... juju ...` from localhost.
 #   This avoids both host-Juju dependency and snap/cgroup issues seen in Ansible
 #   remote sessions inside LXD guests.
+# - The juju_channel, k8s_charm_channel and k8s_charm_base variables come from versions.env
+#   through orchestrate.sh.
 # ==============================================================================
 
 - name: Wait for Juju nodes and gather facts
@@ -30,7 +32,6 @@
   hosts: k8s_juju_controller
   gather_facts: false
   vars:
-    juju_channel: "3.6/stable"
     juju_user: "ubuntu"
     juju_home: "/home/ubuntu"
   tasks:
@@ -107,9 +108,6 @@
     juju_cp_hosts: "{{ groups['k8s_juju_cp'] | default([]) }}"
     juju_worker_hosts: "{{ groups['k8s_juju_workers'] | default([]) }}"
     juju_machine_hosts: "{{ juju_cp_hosts + juju_worker_hosts }}"
-    # The canonical-kubernetes bundle stopped at 1.32; deploy the charms directly.
-    k8s_charm_channel: "1.35/stable"
-    k8s_charm_base: "ubuntu@24.04"
   tasks:
     - name: Check if Juju controller already bootstrapped
       command: >

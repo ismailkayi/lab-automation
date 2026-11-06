@@ -51,7 +51,7 @@ cos_ensure_infrastructure() {
     if ! cos_lxc info "local:${COS_VM}" >/dev/null 2>&1; then
         [[ -n "$LXD_STORAGE_POOL" ]] || { log_warn "No LXD storage pool selected. Run through orchestrate.sh."; return 1; }
         log_info "Creating VM ${COS_VM} (4 vCPU, 12 GiB RAM, 60 GiB disk)."
-        cos_lxc launch ubuntu:24.04 "local:${COS_VM}" --vm --network "$COS_NETWORK" \
+        cos_lxc launch "$COS_VM_IMAGE" "local:${COS_VM}" --vm --network "$COS_NETWORK" \
             --storage "$LXD_STORAGE_POOL" -c limits.cpu=4 -c limits.memory=12GiB \
             -d root,size=60GiB -c user.lab-automation.component=cos-demo || return 1
     else
@@ -159,10 +159,12 @@ cos_disable_host_monitoring() {
 }
 
 cos_run_setup() {
+    local -a versions=()
+    version_env_args versions COS_
     cos_lxc file push "$COS_SETTINGS" "local:${COS_VM}/root/cos.env" --mode 0600 || return 1
     cos_lxc file push "${SCRIPT_DIR}/scripts/cos_guest.sh" "local:${COS_VM}/root/cos-setup.sh" --mode 0700 || return 1
     log_info "Installing COS Lite inside ${COS_VM}; output is also saved to ${COS_STATE_DIR}/setup.log"
-    cos_lxc exec "local:${COS_VM}" -- bash /root/cos-setup.sh 2>&1 | tee -a "${COS_STATE_DIR}/setup.log"
+    cos_lxc exec "local:${COS_VM}" "${versions[@]}" -- bash /root/cos-setup.sh 2>&1 | tee -a "${COS_STATE_DIR}/setup.log"
     local -a status=("${PIPESTATUS[@]}")
     if (( status[0] != 0 || status[1] != 0 )); then
         log_warn "COS setup or writing setup.log failed."

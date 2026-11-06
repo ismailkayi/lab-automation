@@ -8,6 +8,11 @@ export PATH="$PATH:/snap/bin"
 # shellcheck source=/dev/null
 source /root/cluster-manager.env
 
+# The host passes the versions from versions.env.
+: "${CM_K8S_CHANNEL:?}" "${CM_JUJU_CHANNEL:?}" "${CM_POSTGRESQL_CHANNEL:?}" \
+    "${CM_CERTIFICATES_CHANNEL:?}" "${CM_TRAEFIK_CHANNEL:?}" "${CM_CLUSTER_MANAGER_CHANNEL:?}" \
+    "${CM_KEYCLOAK_IMAGE:?}"
+
 REALM="microcloud-training"
 CLIENT_ID="cluster-manager"
 MODEL="lab-cm:cluster-manager"
@@ -60,8 +65,8 @@ kubectl() { k8s kubectl "$@"; }
 step "Installing snaps"
 cloud-init status --wait >/dev/null || true
 snap wait system seed.loaded
-install_snap k8s 1.35-classic/stable --classic
-install_snap juju 3.6/stable
+install_snap k8s "$CM_K8S_CHANNEL" --classic
+install_snap juju "$CM_JUJU_CHANNEL"
 
 step "Bootstrapping Canonical Kubernetes"
 if [[ ! -f /var/lib/cluster-manager-k8s-bootstrapped ]]; then
@@ -113,7 +118,7 @@ spec:
       securityContext: {fsGroup: 1000}
       containers:
         - name: keycloak
-          image: quay.io/keycloak/keycloak:26.8.1
+          image: ${CM_KEYCLOAK_IMAGE}
           args: [start-dev]
           env:
             - {name: KC_HOSTNAME, value: "${KEYCLOAK_URL}"}
@@ -217,10 +222,10 @@ deploy() {
         retry juju deploy -m "$MODEL" "$app" --trust "$@"
     fi
 }
-deploy postgresql-k8s --channel 14/stable
-deploy self-signed-certificates
-deploy traefik-k8s --config "loadbalancer_annotations=${LB_ANNOTATIONS}"
-deploy "$CM_APP"
+deploy postgresql-k8s --channel "$CM_POSTGRESQL_CHANNEL"
+deploy self-signed-certificates --channel "$CM_CERTIFICATES_CHANNEL"
+deploy traefik-k8s --channel "$CM_TRAEFIK_CHANNEL" --config "loadbalancer_annotations=${LB_ANNOTATIONS}"
+deploy "$CM_APP" --channel "$CM_CLUSTER_MANAGER_CHANNEL"
 
 juju config -m "$MODEL" traefik-k8s external_hostname="$MANAGER_IP" loadbalancer_annotations="$LB_ANNOTATIONS"
 juju config -m "$MODEL" "$CM_APP" \

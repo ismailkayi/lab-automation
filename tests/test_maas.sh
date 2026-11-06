@@ -86,7 +86,7 @@ curl() { fail "Unexpected real HTTP call: $*"; }
     export LXD_STORAGE_POOL=demo-pool
     SUBNET_PREFIX=172.31.7
     PXE_PREFIX=172.31.8
-    MAAS_VM_CPU=6 MAAS_VM_MEMORY_GIB=12 MAAS_VM_DISK_GIB=100 MAAS_VM_IMAGE=ubuntu:24.04
+    MAAS_VM_CPU=6 MAAS_VM_MEMORY_GIB=12 MAAS_VM_DISK_GIB=100 MAAS_VM_IMAGE=ubuntu:test-image
     maas_check_kvm() { :; }
     maas_check_memory() { :; }
     maas_ip() { echo 172.31.7.50; }
@@ -102,7 +102,7 @@ curl() { fail "Unexpected real HTTP call: $*"; }
     calls="$(cat "$TMP/calls")"
     assert_contains "$calls" "network create local:lab-maasbr0 ipv4.address=172.31.7.1/24 ipv4.nat=true ipv6.address=none"
     assert_contains "$calls" "ipv4.dhcp.ranges=172.31.7.10-172.31.7.99 user.lab-automation.component=maas-demo user.lab-automation.cidr=172.31.8.0/24"
-    assert_contains "$calls" "launch ubuntu:24.04 local:lab-maas --vm --network lab-maasbr0 --storage demo-pool"
+    assert_contains "$calls" "launch ubuntu:test-image local:lab-maas --vm --network lab-maasbr0 --storage demo-pool"
     assert_contains "$calls" "-c limits.cpu=6 -c limits.memory=12GiB -d root,size=100GiB -c user.lab-automation.component=maas-demo"
     assert_contains "$calls" "config device set local:lab-maas eth0 ipv4.address=172.31.7.50"
     [[ "$MAAS_IP" == "172.31.7.50" ]] || fail "The VM address must be exported for the setup"
@@ -172,10 +172,11 @@ curl() { fail "Unexpected real HTTP call: $*"; }
     fi
 )
 
-# The guest output is logged, and failures propagate through tee.
+# The guest output is logged, and failures propagate through tee. Only the MAAS versions are
+# handed to the guest.
 (
     SCRIPT_DIR="$REPO_ROOT"
-    MAAS_IP=172.31.7.50 MAAS_CHANNEL=3.8/candidate MAAS_LXD_CHANNEL=5.21/stable MAAS_TARGET_COUNT=2
+    MAAS_IP=172.31.7.50 MAAS_CHANNEL=9.9/test MAAS_LXD_CHANNEL=8.8/test MAAS_TARGET_COUNT=2
     mkdir -p "$MAAS_STATE_DIR"
     : > "$TMP/calls"
     maas_lxc() {
@@ -191,8 +192,15 @@ curl() { fail "Unexpected real HTTP call: $*"; }
     calls="$(cat "$TMP/calls")"
     assert_contains "$calls" "push local:lab-maas/root/maas.env"
     assert_contains "$calls" "push local:lab-maas/root/maas-setup.sh"
-    assert_contains "$calls" "exec local:lab-maas --env MAAS_IP=172.31.7.50 --env MAAS_CHANNEL=3.8/candidate"
-    assert_contains "$calls" "--env MAAS_LXD_CHANNEL=5.21/stable --env MAAS_TARGET_COUNT=2 -- bash /root/maas-setup.sh"
+    assert_contains "$calls" "exec local:lab-maas --env MAAS_IP=172.31.7.50 --env MAAS_TARGET_COUNT=2 --env MAAS_"
+    for pair in MAAS_CHANNEL=9.9/test MAAS_LXD_CHANNEL=8.8/test "MAAS_POSTGRESQL_CHANNEL=${MAAS_POSTGRESQL_CHANNEL}" \
+        "MAAS_DEPLOY_SERIES=${MAAS_DEPLOY_SERIES}"; do
+        assert_contains "$calls" "--env ${pair}"
+    done
+    assert_contains "$calls" "-- bash /root/maas-setup.sh"
+    for other in LANDSCAPE_ COS_ CM_ LXD_CHANNEL K8S_ JUJU_ UBUNTU_IMAGE; do
+        [[ "$calls" != *"--env ${other}"* ]] || fail "The MAAS guest must not receive ${other}* versions"
+    done
     assert_contains "$(cat "$MAAS_STATE_DIR/setup.log")" "guest output"
 
     maas_lxc() {
@@ -418,6 +426,14 @@ grep -q 'sshkeys create' "$guest" || fail "An SSH key must be uploaded so machin
 grep -qF 'New | Commissioning | Testing | "Failed commissioning")' "$guest" || fail "A rerun must only wait for machines that are still being commissioned"
 grep -q 'ubuntu/\${SERIES}' "$guest" || fail "The boot image check must use MAAS's image names"
 [[ "$(grep -c 'rack-controller refresh' "$guest")" == 0 ]] || fail "MAAS 3.8 has no rack-controller refresh command"
+for key in MAAS_CHANNEL MAAS_POSTGRESQL_CHANNEL MAAS_LXD_CHANNEL MAAS_DEPLOY_SERIES; do
+    grep -qF "\"\${${key}:?}\"" "$guest" || fail "The guest must require ${key} from the host"
+done
+grep -F 'snap refresh lxd' "$guest" -B1 | grep -qF '! lxd_held' || fail "A rerun must not switch the channel of an LXD that is already held"
+grep -qF 'snap refresh --hold=forever maas postgresql lxd' "$guest" || fail "The snaps must be held after the first setup"
+if grep -Eq '[A-Za-z0-9.]+/(stable|candidate|beta|edge)' "$guest" "${REPO_ROOT}/scripts/maas.sh"; then
+    fail "MAAS channels belong in versions.env, not in the scripts"
+fi
 steps="$(grep -c '^step "' "$guest")"
 grep -qx "TOTAL_STEPS=${steps}" "$guest" || fail "Step counter must match the ${steps} steps"
 
